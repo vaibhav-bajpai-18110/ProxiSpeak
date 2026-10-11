@@ -29,6 +29,15 @@ app.get("/api/health", (req, res) => {
   });
 });
 
+app.get("/api/status", (req, res) => {
+  res.json({
+    status: "active",
+    message: "ProxiSpeak server is operational",
+    uptime: `${Math.floor(process.uptime())}s`,
+    timestamp: new Date().toISOString()
+  });
+});
+
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
 

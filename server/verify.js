@@ -49,6 +49,18 @@ async function runTest() {
       console.error("--> FAIL: Health check endpoint unexpected response.");
     }
 
+    console.log("\n--- Testing Route 3: GET http://localhost:5000/api/status ---");
+    const statusRes = await checkUrl("http://localhost:5000/api/status");
+    console.log(`Status: ${statusRes.status}`);
+    console.log(`Body: ${statusRes.body}`);
+
+    const statusJson = JSON.parse(statusRes.body);
+    if (statusRes.status === 200 && statusJson.status === "active") {
+      console.log("--> PASS: Status endpoint verified.");
+    } else {
+      console.error("--> FAIL: Status endpoint unexpected response.");
+    }
+
     console.log("\n--- Testing Socket.IO Connection ---");
     // Connect to Socket.io via HTTP polling handshake or socket.io protocol
     const socketRes = await checkUrl("http://localhost:5000/socket.io/?EIO=4&transport=polling");
