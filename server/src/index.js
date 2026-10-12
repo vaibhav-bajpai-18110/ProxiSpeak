@@ -41,6 +41,11 @@ app.get("/api/status", (req, res) => {
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
 
+  socket.on("ping", (data) => {
+    console.log("Received ping from client:", socket.id);
+    socket.emit("pong", data || "pong");
+  });
+
   socket.on("disconnect", () => {
     console.log("User disconnected:", socket.id);
   });
