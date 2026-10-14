@@ -1,9 +1,48 @@
-
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { io } from "socket.io-client";
 import "./App.css";
+
+const SERVER_URL = "http://localhost:5000";
 
 function App() {
   const [started, setStarted] = useState(false);
+  const [connected, setConnected] = useState(false);
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    if (!started) {
+      setConnected(false);
+      return;
+    }
+
+    const socket = io(SERVER_URL);
+
+    socket.on("connect", () => {
+      setConnected(true);
+      setMessage("Connected to ProxiSpeak backend!");
+      socket.emit("ping", { message: "Hello from React frontend" });
+    });
+
+    socket.on("pong", (data) => {
+      setMessage(
+        typeof data === "object" ? data.message : String(data)
+      );
+    });
+
+    socket.on("disconnect", () => {
+      setConnected(false);
+      setMessage("Disconnected from backend.");
+    });
+
+    socket.on("connect_error", () => {
+      setConnected(false);
+      setMessage("Unable to connect. Is the backend running?");
+    });
+
+    return () => {
+      socket.disconnect();
+    };
+  }, [started]);
 
   function handleStart() {
     setStarted((previous) => !previous);
@@ -19,7 +58,7 @@ function App() {
 
         <span className="nav-status">
           <span className="status-dot"></span>
-          Not connected
+          {connected ? "Connected" : "Not connected"}
         </span>
       </header>
 
@@ -45,8 +84,8 @@ function App() {
         <div className="status-card">
           <div className="status-row">
             <span>Connection Status</span>
-            <strong className="disconnected">
-              Disconnected
+            <strong className={connected ? "ready" : "disconnected"}>
+              {connected ? "Connected" : "Disconnected"}
             </strong>
           </div>
 
@@ -58,22 +97,19 @@ function App() {
           </div>
         </div>
 
-        <button
-          className="start-button"
-          onClick={handleStart}
-        >
+        <button className="start-button" onClick={handleStart}>
           {started ? "Stop ProxiSpeak" : "Start ProxiSpeak"}
           <span>→</span>
         </button>
 
         {started && (
           <p className="feedback">
-            ProxiSpeak frontend started successfully!
+            {message || "Connecting to backend..."}
           </p>
         )}
 
         <p className="footer-note">
-          Frontend prototype • React + Vite
+          Frontend prototype • React + Vite + Socket.IO
         </p>
       </main>
 
