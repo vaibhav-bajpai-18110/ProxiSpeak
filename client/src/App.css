@@ -199,3 +199,65 @@ h1 span {
     font-size: 14px;
   }
 }
+
+/* Backend connection states */
+
+.status-dot.loading {
+  background: #fbbf24;
+  animation: pulse 1.2s infinite;
+}
+.status-dot.connected {
+  background: #34d399;
+  box-shadow: 0 0 10px #34d39966;
+}
+
+.status-dot.disconnected {
+  background: #f87171;
+}
+
+strong.loading {
+  color: #fbbf24;
+}
+
+strong.connected {
+  color: #34d399;
+}
+
+strong.disconnected {
+  color: #f87171;
+}
+
+.api-details {
+  border-top: 1px solid #30364d;
+  padding: 15px 0;
+  text-align: left;
+}
+
+.api-details p {
+  color: #aab3c8;
+  font-size: 13px;
+  margin-bottom: 10px;
+}
+
+.api-details pre {
+  background: #0c1020;
+  padding: 14px;
+  border-radius: 8px;
+  color: #86efac;
+  font-size: 13px;
+  overflow-x: auto;
+}
+
+.api-error {
+  color: #fca5a5;
+  font-size: 13px;
+  line-height: 1.6;
+  padding: 12px 0;
+  border-top: 1px solid #30364d;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.4;
+  }
+}
