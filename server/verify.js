@@ -41,6 +41,54 @@ async function testSocketPingPong(serverUrl) {
   });
 }
 
+async function testMultiClientPositionSync(serverUrl) {
+  return new Promise((resolve, reject) => {
+    const client1 = io(serverUrl, { transports: ["websocket", "polling"], timeout: 5000 });
+    const client2 = io(serverUrl, { transports: ["websocket", "polling"], timeout: 5000 });
+
+    let client1Connected = false;
+    let client2Connected = false;
+
+    const timeout = setTimeout(() => {
+      client1.disconnect();
+      client2.disconnect();
+      reject(new Error("Multi-client position test timed out"));
+    }, 6000);
+
+    client1.on("connect", () => {
+      client1Connected = true;
+      console.log(`[CLIENT 1]: Connected (${client1.id})`);
+      checkAndMove();
+    });
+
+    client2.on("connect", () => {
+      client2Connected = true;
+      console.log(`[CLIENT 2]: Connected (${client2.id})`);
+      checkAndMove();
+    });
+
+    function checkAndMove() {
+      if (client1Connected && client2Connected) {
+        console.log("[CLIENT 1]: Emitting updatePosition { x: 300, y: 250 }");
+        client1.emit("updatePosition", { x: 300, y: 250 });
+      }
+    }
+
+    client2.on("userPositionUpdated", (data) => {
+      console.log(`[CLIENT 2]: Received userPositionUpdated from ${data.id}: (${data.x}, ${data.y})`);
+      if (data.id === client1.id && data.x === 300 && data.y === 250) {
+        clearTimeout(timeout);
+        client1.disconnect();
+        client2.disconnect();
+        resolve(true);
+      }
+    });
+
+    client1.on("connect_error", (e) => reject(e));
+    client2.on("connect_error", (e) => reject(e));
+  });
+}
+
 async function runTest() {
   let hasErrors = false;
   console.log("Starting server process...");
@@ -105,6 +153,15 @@ async function runTest() {
       console.log("--> PASS: Socket.IO ping/pong event exchange verified successfully.");
     } else {
       console.error("--> FAIL: Socket.IO ping/pong did not return expected response.");
+      hasErrors = true;
+    }
+
+    console.log("\n--- Testing Route 5: Multi-Client User Position Synchronization ---");
+    const syncSuccess = await testMultiClientPositionSync("http://localhost:5000");
+    if (syncSuccess) {
+      console.log("--> PASS: Multi-client position update and broadcasting verified successfully.");
+    } else {
+      console.error("--> FAIL: Multi-client position synchronization failed.");
       hasErrors = true;
     }
 

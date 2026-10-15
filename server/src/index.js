@@ -1,8 +1,11 @@
 const express = require("express");
 const http = require("http");
+const path = require("path");
 const cors = require("cors");
 const { Server } = require("socket.io");
 require("dotenv").config();
+
+const { registerSocketHandlers } = require("./sockets/socketHandlers");
 
 const app = express();
 
@@ -18,9 +21,18 @@ const io = new Server(server, {
   }
 });
 
+// Root API route
 app.get("/", (req, res) => {
   res.send("ProxiSpeak Backend is running!");
 });
+
+// Interactive multi-browser testing demo
+app.get("/demo", (req, res) => {
+  res.sendFile(path.join(__dirname, "../public/index.html"));
+});
+
+// Serve static assets for demo (without overriding root)
+app.use(express.static(path.join(__dirname, "../public"), { index: false }));
 
 app.get("/api/health", (req, res) => {
   res.json({
@@ -39,16 +51,7 @@ app.get("/api/status", (req, res) => {
 });
 
 io.on("connection", (socket) => {
-  console.log("User connected:", socket.id);
-
-  socket.on("ping", (data) => {
-    console.log("Received ping from client:", socket.id);
-    socket.emit("pong", data || "pong");
-  });
-
-  socket.on("disconnect", () => {
-    console.log("User disconnected:", socket.id);
-  });
+  registerSocketHandlers(io, socket);
 });
 
 const PORT = process.env.PORT || 5000;
