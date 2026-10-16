@@ -20,7 +20,7 @@ function isValidPosition(position) {
     Number.isFinite(position.x) &&
     Number.isFinite(position.y);
 }
-
+console.log("PROXISPEAK APP LOADED");
 function App() {
   const [started, setStarted] = useState(false);
   const [connected, setConnected] = useState(false);
@@ -97,9 +97,11 @@ function App() {
     }
 
     socket.on("connect", () => {
+      console.log("SOCKET CONNECTED:", socket.id);
       setConnected(true);
       setMessage("Connected to ProxiSpeak backend!");
 
+      console.log("SENDING JOIN EVENT");
       socket.emit("join", { username: "Vaibhav" });
       socket.emit("ping", { message: "Hello from React frontend" });
     });
@@ -110,10 +112,21 @@ function App() {
       );
     });
 
+    console.log("REGISTERING CURRENT USERS LISTENER");
     socket.on("currentUsers", (users) => {
-      if (!Array.isArray(users)) return;
-      setRemoteUsers(users.filter((user) => user.id !== socket.id));
-    });
+      console.log("CURRENT USERS:", users);
+  console.log("CURRENT USERS:", users);
+
+  if (!Array.isArray(users)) return;
+
+  setRemoteUsers(users.filter((user) => user.id !== socket.id));
+});
+
+console.log("REGISTERING USER JOINED LISTENER");
+socket.on("userJoined", (user) => {
+  console.log("USER JOINED:", user);
+  upsertUser(user);
+});
 
     socket.on("userJoined", upsertUser);
     socket.on("userPositionUpdated", upsertUser);

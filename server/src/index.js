@@ -3,7 +3,7 @@ const http = require("http");
 const cors = require("cors");
 const { Server } = require("socket.io");
 require("dotenv").config();
-
+const { registerSocketHandlers } = require("./sockets/socketHandlers");
 const app = express();
 
 app.use(cors());
@@ -41,14 +41,7 @@ app.get("/api/status", (req, res) => {
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
 
-  socket.on("ping", (data) => {
-    console.log("Received ping from client:", socket.id);
-    socket.emit("pong", data || "pong");
-  });
-
-  socket.on("disconnect", () => {
-    console.log("User disconnected:", socket.id);
-  });
+  registerSocketHandlers(io, socket);
 });
 
 const PORT = process.env.PORT || 5000;
