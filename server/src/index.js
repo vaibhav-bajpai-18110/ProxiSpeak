@@ -50,6 +50,20 @@ app.get("/api/status", (req, res) => {
   });
 });
 
+// 404 Handler for unknown routes
+app.use((req, res, next) => {
+  if (req.path.startsWith("/api/")) {
+    return res.status(404).json({ error: "Not Found", path: req.path });
+  }
+  res.status(404).send("Not Found");
+});
+
+// Global Error Handling Middleware
+app.use((err, req, res, next) => {
+  console.error("[SERVER ERROR]:", err);
+  res.status(500).json({ error: "Internal Server Error", message: err.message });
+});
+
 io.on("connection", (socket) => {
   registerSocketHandlers(io, socket);
 });

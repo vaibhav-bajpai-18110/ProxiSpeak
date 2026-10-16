@@ -8,6 +8,7 @@ async function checkUrl(url) {
   return { status: res.status, body: text };
 }
 
+// Test 1: Socket.IO Ping-Pong Handshake
 async function testSocketPingPong(serverUrl) {
   return new Promise((resolve, reject) => {
     const socket = io(serverUrl, {
@@ -21,14 +22,11 @@ async function testSocketPingPong(serverUrl) {
     }, 5000);
 
     socket.on("connect", () => {
-      console.log(`[TEST CLIENT]: Connected with socket id: ${socket.id}`);
-      console.log("[TEST CLIENT]: Emitting 'ping' event to server...");
       socket.emit("ping", { message: "ping from test client", sentAt: Date.now() });
     });
 
     socket.on("pong", (data) => {
       clearTimeout(timeout);
-      console.log("[TEST CLIENT]: Received 'pong' event response from server:", JSON.stringify(data));
       socket.disconnect();
       resolve(data);
     });
@@ -41,6 +39,7 @@ async function testSocketPingPong(serverUrl) {
   });
 }
 
+// Test 2: Multi-Client Position Update & Broadcasting
 async function testMultiClientPositionSync(serverUrl) {
   return new Promise((resolve, reject) => {
     const client1 = io(serverUrl, { transports: ["websocket", "polling"], timeout: 5000 });
@@ -57,25 +56,21 @@ async function testMultiClientPositionSync(serverUrl) {
 
     client1.on("connect", () => {
       client1Connected = true;
-      console.log(`[CLIENT 1]: Connected (${client1.id})`);
       checkAndMove();
     });
 
     client2.on("connect", () => {
       client2Connected = true;
-      console.log(`[CLIENT 2]: Connected (${client2.id})`);
       checkAndMove();
     });
 
     function checkAndMove() {
       if (client1Connected && client2Connected) {
-        console.log("[CLIENT 1]: Emitting updatePosition { x: 300, y: 250 }");
         client1.emit("updatePosition", { x: 300, y: 250 });
       }
     }
 
     client2.on("userPositionUpdated", (data) => {
-      console.log(`[CLIENT 2]: Received userPositionUpdated from ${data.id}: (${data.x}, ${data.y})`);
       if (data.id === client1.id && data.x === 300 && data.y === 250) {
         clearTimeout(timeout);
         client1.disconnect();
@@ -89,84 +84,208 @@ async function testMultiClientPositionSync(serverUrl) {
   });
 }
 
+// Test 3: Backend Validation - Reject Malformed Payloads & Clamp Coordinates
+async function testBackendValidation(serverUrl) {
+  return new Promise((resolve, reject) => {
+    const clientA = io(serverUrl, { transports: ["websocket", "polling"], timeout: 5000 });
+    const clientB = io(serverUrl, { transports: ["websocket", "polling"], timeout: 5000 });
+
+    let validationErrorsReceived = 0;
+    let clampedBroadcastReceived = false;
+
+    const timeout = setTimeout(() => {
+      clientA.disconnect();
+      clientB.disconnect();
+      reject(new Error("Backend validation test timed out"));
+    }, 6000);
+
+    let readyCount = 0;
+    function onReady() {
+      readyCount++;
+      if (readyCount === 2) {
+        // Step 1: Send non-numeric / malformed payload
+        clientA.emit("updatePosition", { x: "invalid_string", y: null });
+
+        // Step 2: Send NaN payload
+        clientA.emit("updatePosition", { x: NaN, y: 150 });
+      }
+    }
+
+    clientA.on("connect", onReady);
+    clientB.on("connect", onReady);
+
+    // Listen for validation error emitted back to sender
+    clientA.on("error:validation", (err) => {
+      validationErrorsReceived++;
+      // Once both invalid payloads are rejected, test coordinate clamping
+      if (validationErrorsReceived === 2) {
+        // Send out-of-bounds coordinates (x: 99999, y: -500) -> should clamp to (2000, 0)
+        clientA.emit("updatePosition", { x: 99999, y: -500 });
+      }
+    });
+
+    // Client B verifies receiving clamped coordinates, NOT corrupted/NaN data
+    clientB.on("userPositionUpdated", (data) => {
+      if (data.id === clientA.id && data.x === 2000 && data.y === 0) {
+        clampedBroadcastReceived = true;
+        clearTimeout(timeout);
+        clientA.disconnect();
+        clientB.disconnect();
+        resolve({ validationErrorsReceived, clampedBroadcastReceived });
+      }
+    });
+
+    clientA.on("connect_error", (e) => reject(e));
+    clientB.on("connect_error", (e) => reject(e));
+  });
+}
+
+// Test 4: Proper User Disconnection Handling & Peer Notification
+async function testDisconnectionHandling(serverUrl) {
+  return new Promise((resolve, reject) => {
+    const observerClient = io(serverUrl, { transports: ["websocket", "polling"], timeout: 5000 });
+    const leavingClient = io(serverUrl, { transports: ["websocket", "polling"], timeout: 5000 });
+
+    const timeout = setTimeout(() => {
+      observerClient.disconnect();
+      leavingClient.disconnect();
+      reject(new Error("Disconnection handling test timed out"));
+    }, 6000);
+
+    let leavingClientId = null;
+
+    leavingClient.on("connect", () => {
+      leavingClientId = leavingClient.id;
+      // Disconnect deliberately after short delay to simulate user closing tab
+      setTimeout(() => {
+        leavingClient.disconnect();
+      }, 500);
+    });
+
+    observerClient.on("userDisconnected", (data) => {
+      if (data && data.id === leavingClientId) {
+        clearTimeout(timeout);
+        observerClient.disconnect();
+        resolve({ disconnectedId: data.id, reason: data.reason });
+      }
+    });
+
+    observerClient.on("connect_error", (e) => reject(e));
+    leavingClient.on("connect_error", (e) => reject(e));
+  });
+}
+
 async function runTest() {
   let hasErrors = false;
-  console.log("Starting server process...");
+  console.log("Starting ProxiSpeak server for verification...");
   const server = spawn("node", ["src/index.js"], {
     cwd: __dirname,
     stdio: ["pipe", "pipe", "pipe"],
   });
 
   server.stdout.on("data", (data) => {
-    console.log(`[SERVER STDOUT]: ${data.toString().trim()}`);
+    const text = data.toString().trim();
+    if (text) console.log(`[SERVER STDOUT]: ${text}`);
   });
 
   server.stderr.on("data", (data) => {
-    console.error(`[SERVER STDERR]: ${data.toString().trim()}`);
+    const text = data.toString().trim();
+    if (text) console.error(`[SERVER STDERR]: ${text}`);
   });
 
   // Allow server to spin up
   await new Promise((resolve) => setTimeout(resolve, 2000));
 
   try {
-    console.log("\n--- Testing Route 1: GET http://localhost:5000/ ---");
-    const rootRes = await checkUrl("http://localhost:5000/");
-    console.log(`Status: ${rootRes.status}`);
-    console.log(`Body: ${rootRes.body}`);
+    console.log("\n==================================================");
+    console.log("  PROXISPEAK BACKEND & SOCKET VERIFICATION SUITE  ");
+    console.log("==================================================");
 
+    // 1. Root route
+    console.log("\n--- [1] Checking Root Endpoint: GET / ---");
+    const rootRes = await checkUrl("http://localhost:5000/");
     if (rootRes.status === 200 && rootRes.body === "ProxiSpeak Backend is running!") {
-      console.log("--> PASS: Root endpoint verified.");
+      console.log("--> PASS: Root endpoint returns 200 OK with correct message.");
     } else {
-      console.error("--> FAIL: Root endpoint unexpected response.");
+      console.error("--> FAIL: Root endpoint failed. Status:", rootRes.status);
       hasErrors = true;
     }
 
-    console.log("\n--- Testing Route 2: GET http://localhost:5000/api/health ---");
+    // 2. Health check
+    console.log("\n--- [2] Checking Health Endpoint: GET /api/health ---");
     const healthRes = await checkUrl("http://localhost:5000/api/health");
-    console.log(`Status: ${healthRes.status}`);
-    console.log(`Body: ${healthRes.body}`);
-
     const healthJson = JSON.parse(healthRes.body);
     if (healthRes.status === 200 && healthJson.status === "OK" && healthJson.project === "ProxiSpeak") {
-      console.log("--> PASS: Health check endpoint verified.");
+      console.log("--> PASS: /api/health returns valid status JSON.");
     } else {
-      console.error("--> FAIL: Health check endpoint unexpected response.");
+      console.error("--> FAIL: /api/health invalid response.");
       hasErrors = true;
     }
 
-    console.log("\n--- Testing Route 3: GET http://localhost:5000/api/status ---");
+    // 3. Status endpoint
+    console.log("\n--- [3] Checking Status Endpoint: GET /api/status ---");
     const statusRes = await checkUrl("http://localhost:5000/api/status");
-    console.log(`Status: ${statusRes.status}`);
-    console.log(`Body: ${statusRes.body}`);
-
     const statusJson = JSON.parse(statusRes.body);
     if (statusRes.status === 200 && statusJson.status === "active") {
-      console.log("--> PASS: Status endpoint verified.");
+      console.log(`--> PASS: /api/status active (uptime: ${statusJson.uptime}).`);
     } else {
-      console.error("--> FAIL: Status endpoint unexpected response.");
+      console.error("--> FAIL: /api/status invalid response.");
       hasErrors = true;
     }
 
-    console.log("\n--- Testing Route 4: Socket.IO Ping-Pong Event ---");
+    // 4. Unknown route 404 handler
+    console.log("\n--- [4] Checking 404 Error Handler: GET /api/unknown ---");
+    const unknownRes = await checkUrl("http://localhost:5000/api/non-existent-route");
+    if (unknownRes.status === 404) {
+      console.log("--> PASS: Unrecognized API routes correctly return 404 Not Found.");
+    } else {
+      console.error("--> FAIL: 404 handler failed. Received status:", unknownRes.status);
+      hasErrors = true;
+    }
+
+    // 5. Socket.IO Ping-Pong Event
+    console.log("\n--- [5] Testing Socket.IO Ping-Pong Event ---");
     const pongResponse = await testSocketPingPong("http://localhost:5000");
     if (pongResponse) {
-      console.log("--> PASS: Socket.IO ping/pong event exchange verified successfully.");
+      console.log("--> PASS: Client sent 'ping', server responded with 'pong'.");
     } else {
-      console.error("--> FAIL: Socket.IO ping/pong did not return expected response.");
+      console.error("--> FAIL: Ping-Pong event failed.");
       hasErrors = true;
     }
 
-    console.log("\n--- Testing Route 5: Multi-Client User Position Synchronization ---");
+    // 6. Multi-Client Position Synchronization
+    console.log("\n--- [6] Testing Multi-Client Position Synchronization ---");
     const syncSuccess = await testMultiClientPositionSync("http://localhost:5000");
     if (syncSuccess) {
-      console.log("--> PASS: Multi-client position update and broadcasting verified successfully.");
+      console.log("--> PASS: Client 1 position update broadcasted and received by Client 2.");
     } else {
-      console.error("--> FAIL: Multi-client position synchronization failed.");
+      console.error("--> FAIL: Position broadcasting failed.");
+      hasErrors = true;
+    }
+
+    // 7. Backend Validation & Payload Sanitization
+    console.log("\n--- [7] Testing Backend Input Validation & Clamping ---");
+    const valResult = await testBackendValidation("http://localhost:5000");
+    if (valResult.validationErrorsReceived >= 2 && valResult.clampedBroadcastReceived) {
+      console.log(`--> PASS: Rejected ${valResult.validationErrorsReceived} malformed payloads (non-numeric, NaN) without server crash.`);
+      console.log("--> PASS: Out-of-bounds coordinates safely clamped to map boundaries [0, 2000].");
+    } else {
+      console.error("--> FAIL: Backend validation checks failed.", valResult);
+      hasErrors = true;
+    }
+
+    // 8. Proper User Disconnection Handling
+    console.log("\n--- [8] Testing Proper User Disconnection Handling ---");
+    const disconnectResult = await testDisconnectionHandling("http://localhost:5000");
+    if (disconnectResult && disconnectResult.disconnectedId) {
+      console.log(`--> PASS: Disconnection of ${disconnectResult.disconnectedId} broadcasted to peers with cleanup.`);
+    } else {
+      console.error("--> FAIL: Disconnection handling failed.");
       hasErrors = true;
     }
 
   } catch (err) {
-    console.error("Verification encountered an error:", err);
+    console.error("\n[TEST RUNNER EXCEPTION]:", err.message || err);
     hasErrors = true;
   } finally {
     console.log("\nShutting down test server...");
@@ -175,10 +294,10 @@ async function runTest() {
     console.log("Server stopped successfully.");
 
     if (hasErrors) {
-      console.error("\n❌ TESTS FAILED");
+      console.error("\n❌ VERIFICATION FAILED: One or more tests did not pass.\n");
       process.exit(1);
     } else {
-      console.log("\n✅ ALL TESTS PASSED");
+      console.log("\n✅ ALL TESTS PASSED: Backend validation, socket events, and disconnection verified.\n");
       process.exit(0);
     }
   }
