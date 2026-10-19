@@ -1,10 +1,10 @@
 /**
  * Socket.IO event handlers for ProxiSpeak
  * Handles connection lifecycle, strict input validation, real-time position broadcasting,
- * and robust user disconnection cleanup.
+ * room join/leave logic, and participant updates for voice communication.
  */
 
-// In-memory store of active users: socket.id -> { id, username, x, y, color }
+// In-memory store of active users: socket.id -> { id, username, roomId, x, y, color }
 const users = new Map();
 
 // Map bounds for the virtual office
@@ -14,6 +14,9 @@ const MAP_BOUNDS = {
   MIN_Y: 0,
   MAX_Y: 2000,
 };
+
+// Default room for all incoming connections
+const DEFAULT_ROOM = "main-office";
 
 // Color palette for distinguishing users in the 2D space
 const AVATAR_COLORS = [
@@ -32,43 +35,52 @@ function getRandomColor() {
   return AVATAR_COLORS[index];
 }
 
-/**
- * Validates whether a value is a valid, finite number (not NaN, not Infinity).
- */
 function isFiniteNumber(val) {
   return typeof val === "number" && Number.isFinite(val) && !Number.isNaN(val);
 }
 
-/**
- * Clamps a number within min and max boundaries.
- */
 function clamp(val, min, max) {
   return Math.max(min, Math.min(max, Math.round(val)));
 }
 
-/**
- * Sanitizes strings (e.g. usernames) to avoid injection or excessive lengths.
- */
 function sanitizeUsername(input, defaultName) {
   if (typeof input !== "string") return defaultName;
   const trimmed = input.trim();
   if (trimmed.length === 0) return defaultName;
-  // Limit to 30 alphanumeric/basic punctuation characters
   return trimmed.slice(0, 30);
+}
+
+function sanitizeRoomId(roomId) {
+  if (typeof roomId !== "string") return DEFAULT_ROOM;
+  const clean = roomId.trim().toLowerCase().replace(/[^a-z0-9-_]/g, "");
+  return clean.length > 0 ? clean.slice(0, 50) : DEFAULT_ROOM;
+}
+
+/**
+ * Returns all active users in a specific room.
+ */
+function getRoomParticipants(roomId) {
+  const participants = [];
+  for (const user of users.values()) {
+    if (user.roomId === roomId) {
+      participants.push(user);
+    }
+  }
+  return participants;
 }
 
 function registerSocketHandlers(io, socket) {
   console.log(`[SOCKET CONNECT] User connected: ${socket.id}`);
 
-  // Handle socket-level errors gracefully to prevent crashing
   socket.on("error", (err) => {
     console.error(`[SOCKET ERROR] Socket ${socket.id} error:`, err?.message || err);
   });
 
-  // Initialize new user with random spawn position and color
+  // Default user record upon connection
   const defaultUser = {
     id: socket.id,
     username: `User-${socket.id.slice(0, 4)}`,
+    roomId: DEFAULT_ROOM,
     x: Math.floor(100 + Math.random() * 400),
     y: Math.floor(100 + Math.random() * 300),
     color: getRandomColor(),
@@ -76,54 +88,133 @@ function registerSocketHandlers(io, socket) {
 
   users.set(socket.id, defaultUser);
 
-  // 1. Send currently connected users to the newly connected user
+  // Automatically join default room
+  socket.join(DEFAULT_ROOM);
+
+  // 1. Initial sync: Send current room participants and all users to newly connected client
+  socket.emit("roomParticipants", {
+    roomId: DEFAULT_ROOM,
+    participants: getRoomParticipants(DEFAULT_ROOM),
+  });
   socket.emit("currentUsers", Array.from(users.values()));
 
-  // 2. Broadcast to all other users that a new user has joined
+  // 2. Broadcast to peers in default room that a participant joined
+  socket.to(DEFAULT_ROOM).emit("participantJoined", defaultUser);
   socket.broadcast.emit("userJoined", defaultUser);
 
-  // 3. Handle custom join / init with payload validation
-  socket.on("join", (userData = {}) => {
+  // 3. Room Join / Switch Handler
+  socket.on("joinRoom", (data = {}) => {
     try {
-      const existing = users.get(socket.id) || defaultUser;
+      const user = users.get(socket.id);
+      if (!user) return;
 
-      const safeUsername = sanitizeUsername(userData?.username, existing.username);
-      const safeX = isFiniteNumber(userData?.x)
-        ? clamp(userData.x, MAP_BOUNDS.MIN_X, MAP_BOUNDS.MAX_X)
-        : existing.x;
-      const safeY = isFiniteNumber(userData?.y)
-        ? clamp(userData.y, MAP_BOUNDS.MIN_Y, MAP_BOUNDS.MAX_Y)
-        : existing.y;
-      const safeColor = typeof userData?.color === "string" && userData.color.startsWith("#")
-        ? userData.color.slice(0, 7)
-        : existing.color;
+      const targetRoom = sanitizeRoomId(data.roomId || DEFAULT_ROOM);
+      const oldRoom = user.roomId;
 
-      const updated = {
-        ...existing,
-        username: safeUsername,
-        x: safeX,
-        y: safeY,
-        color: safeColor,
-      };
+      if (oldRoom === targetRoom) {
+        // Already in target room; send latest participant list
+        socket.emit("roomParticipants", {
+          roomId: targetRoom,
+          participants: getRoomParticipants(targetRoom),
+        });
+        return;
+      }
 
-      users.set(socket.id, updated);
-      socket.broadcast.emit("userJoined", updated);
+      // Leave old room
+      socket.leave(oldRoom);
+      socket.to(oldRoom).emit("participantLeft", {
+        id: socket.id,
+        username: user.username,
+        roomId: oldRoom,
+      });
+
+      // Join new room
+      socket.join(targetRoom);
+      user.roomId = targetRoom;
+      if (data.username) {
+        user.username = sanitizeUsername(data.username, user.username);
+      }
+      users.set(socket.id, user);
+
+      console.log(`[ROOM SWITCH] User ${socket.id} moved from ${oldRoom} to ${targetRoom}`);
+
+      // Send participant list of new room to joining user
+      socket.emit("roomParticipants", {
+        roomId: targetRoom,
+        participants: getRoomParticipants(targetRoom),
+      });
+
+      // Notify other members of new room
+      socket.to(targetRoom).emit("participantJoined", user);
     } catch (err) {
-      console.error(`[JOIN ERROR] Failed to process join for ${socket.id}:`, err.message);
-      socket.emit("error:validation", { message: "Invalid join payload" });
+      console.error(`[JOIN ROOM ERROR] ${socket.id}:`, err.message);
+      socket.emit("error:validation", { message: "Failed to join room" });
     }
   });
 
-  // 4. Handle user position updates with strict validation
+  // Alias join handler
+  socket.on("join", (userData = {}) => {
+    const user = users.get(socket.id) || defaultUser;
+    if (userData.username) {
+      user.username = sanitizeUsername(userData.username, user.username);
+    }
+    if (userData.roomId) {
+      socket.emit("joinRoom", { roomId: userData.roomId, username: user.username });
+      return;
+    }
+    users.set(socket.id, user);
+    socket.broadcast.emit("userJoined", user);
+  });
+
+  // 4. Leave Room Handler
+  socket.on("leaveRoom", (data = {}) => {
+    try {
+      const user = users.get(socket.id);
+      if (!user) return;
+
+      const roomToLeave = sanitizeRoomId(data.roomId || user.roomId);
+      socket.leave(roomToLeave);
+
+      socket.to(roomToLeave).emit("participantLeft", {
+        id: socket.id,
+        username: user.username,
+        roomId: roomToLeave,
+      });
+
+      // Revert to default room
+      socket.join(DEFAULT_ROOM);
+      user.roomId = DEFAULT_ROOM;
+      users.set(socket.id, user);
+
+      socket.emit("roomParticipants", {
+        roomId: DEFAULT_ROOM,
+        participants: getRoomParticipants(DEFAULT_ROOM),
+      });
+      socket.to(DEFAULT_ROOM).emit("participantJoined", user);
+    } catch (err) {
+      console.error(`[LEAVE ROOM ERROR] ${socket.id}:`, err.message);
+    }
+  });
+
+  // 5. Get participants for a room
+  socket.on("getParticipants", (data = {}, callback) => {
+    const roomId = sanitizeRoomId(data.roomId || DEFAULT_ROOM);
+    const participants = getRoomParticipants(roomId);
+    if (typeof callback === "function") {
+      callback({ roomId, participants });
+    } else {
+      socket.emit("roomParticipants", { roomId, participants });
+    }
+  });
+
+  // 6. User Position Updates & Broadcasting
   socket.on("updatePosition", (positionData) => {
     try {
-      // Validation Check 1: Must be a non-null object
       if (!positionData || typeof positionData !== "object" || Array.isArray(positionData)) {
         socket.emit("error:validation", { message: "Position payload must be an object" });
         return;
       }
 
-      // Validation Check 2: Coordinates must be valid finite numbers
       if (!isFiniteNumber(positionData.x) || !isFiniteNumber(positionData.y)) {
         socket.emit("error:validation", {
           message: "Coordinates x and y must be finite numbers",
@@ -138,7 +229,6 @@ function registerSocketHandlers(io, socket) {
         return;
       }
 
-      // Validation Check 3: Clamp coordinates to map boundaries
       const boundedX = clamp(positionData.x, MAP_BOUNDS.MIN_X, MAP_BOUNDS.MAX_X);
       const boundedY = clamp(positionData.y, MAP_BOUNDS.MIN_Y, MAP_BOUNDS.MAX_Y);
 
@@ -148,12 +238,13 @@ function registerSocketHandlers(io, socket) {
 
       const updatePayload = {
         id: socket.id,
+        username: currentUser.username,
+        roomId: currentUser.roomId,
         x: boundedX,
         y: boundedY,
-        username: currentUser.username,
       };
 
-      // Broadcast validated coordinates to all other connected clients
+      // Broadcast position updates to all connected peers in the virtual office
       socket.broadcast.emit("userPositionUpdated", updatePayload);
       socket.broadcast.emit("userMoved", updatePayload);
     } catch (err) {
@@ -162,26 +253,61 @@ function registerSocketHandlers(io, socket) {
     }
   });
 
-  // Alias listener for userMoved
   socket.on("userMoved", (positionData) => {
     socket.emit("updatePosition", positionData);
   });
 
-  // 5. Ping-Pong event (maintains backward compatibility with Day 2)
+  // 7. WebRTC Signaling Relays for Voice Communication
+  socket.on("signal:offer", ({ targetId, offer }) => {
+    if (targetId && offer) {
+      io.to(targetId).emit("signal:offer", {
+        senderId: socket.id,
+        offer,
+      });
+    }
+  });
+
+  socket.on("signal:answer", ({ targetId, answer }) => {
+    if (targetId && answer) {
+      io.to(targetId).emit("signal:answer", {
+        senderId: socket.id,
+        answer,
+      });
+    }
+  });
+
+  socket.on("signal:ice-candidate", ({ targetId, candidate }) => {
+    if (targetId && candidate) {
+      io.to(targetId).emit("signal:ice-candidate", {
+        senderId: socket.id,
+        candidate,
+      });
+    }
+  });
+
+  // 8. Ping-Pong event (maintains backward compatibility)
   socket.on("ping", (data) => {
     socket.emit("pong", data || "pong");
   });
 
-  // 6. Robust user disconnection handling
+  // 9. Disconnection & Cleanup
   socket.on("disconnect", (reason) => {
     console.log(`[SOCKET DISCONNECT] User disconnected: ${socket.id} (Reason: ${reason})`);
 
     const existingUser = users.get(socket.id);
-
-    // Guaranteed cleanup from active users registry
     users.delete(socket.id);
 
-    // Notify all remaining clients that this user left
+    if (existingUser) {
+      // Notify participants in user's room
+      socket.to(existingUser.roomId).emit("participantLeft", {
+        id: socket.id,
+        username: existingUser.username,
+        roomId: existingUser.roomId,
+        reason,
+      });
+    }
+
+    // Notify all remaining clients across the server
     const disconnectPayload = {
       id: socket.id,
       username: existingUser?.username || `User-${socket.id.slice(0, 4)}`,
@@ -193,7 +319,6 @@ function registerSocketHandlers(io, socket) {
   });
 }
 
-// Helpers for test assertions and monitoring
 function getUserCount() {
   return users.size;
 }
@@ -209,11 +334,14 @@ function clearUsers() {
 module.exports = {
   registerSocketHandlers,
   users,
+  getRoomParticipants,
   getUserCount,
   hasUser,
   clearUsers,
   isFiniteNumber,
   clamp,
   sanitizeUsername,
+  sanitizeRoomId,
+  DEFAULT_ROOM,
   MAP_BOUNDS,
 };

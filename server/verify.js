@@ -103,10 +103,7 @@ async function testBackendValidation(serverUrl) {
     function onReady() {
       readyCount++;
       if (readyCount === 2) {
-        // Step 1: Send non-numeric / malformed payload
         clientA.emit("updatePosition", { x: "invalid_string", y: null });
-
-        // Step 2: Send NaN payload
         clientA.emit("updatePosition", { x: NaN, y: 150 });
       }
     }
@@ -114,17 +111,13 @@ async function testBackendValidation(serverUrl) {
     clientA.on("connect", onReady);
     clientB.on("connect", onReady);
 
-    // Listen for validation error emitted back to sender
     clientA.on("error:validation", (err) => {
       validationErrorsReceived++;
-      // Once both invalid payloads are rejected, test coordinate clamping
       if (validationErrorsReceived === 2) {
-        // Send out-of-bounds coordinates (x: 99999, y: -500) -> should clamp to (2000, 0)
         clientA.emit("updatePosition", { x: 99999, y: -500 });
       }
     });
 
-    // Client B verifies receiving clamped coordinates, NOT corrupted/NaN data
     clientB.on("userPositionUpdated", (data) => {
       if (data.id === clientA.id && data.x === 2000 && data.y === 0) {
         clampedBroadcastReceived = true;
@@ -156,7 +149,6 @@ async function testDisconnectionHandling(serverUrl) {
 
     leavingClient.on("connect", () => {
       leavingClientId = leavingClient.id;
-      // Disconnect deliberately after short delay to simulate user closing tab
       setTimeout(() => {
         leavingClient.disconnect();
       }, 500);
@@ -172,6 +164,64 @@ async function testDisconnectionHandling(serverUrl) {
 
     observerClient.on("connect_error", (e) => reject(e));
     leavingClient.on("connect_error", (e) => reject(e));
+  });
+}
+
+// Test 5: Room Join/Leave Logic & Participant Updates for Voice Communication
+async function testRoomJoinAndParticipantUpdates(serverUrl) {
+  return new Promise((resolve, reject) => {
+    const client1 = io(serverUrl, { transports: ["websocket", "polling"], timeout: 5000 });
+    const client2 = io(serverUrl, { transports: ["websocket", "polling"], timeout: 5000 });
+
+    let client2JoinedReceived = false;
+    let client2LeftReceived = false;
+    let client2NewRoomConfirmed = false;
+
+    const timeout = setTimeout(() => {
+      client1.disconnect();
+      client2.disconnect();
+      reject(new Error("Room join/leave and participant update test timed out"));
+    }, 6000);
+
+    // Client 1 checks for Client 2 joining main-office
+    client1.on("participantJoined", (user) => {
+      if (user.id === client2.id && user.roomId === "main-office") {
+        client2JoinedReceived = true;
+        // Trigger Client 2 to switch room to conference-1
+        client2.emit("joinRoom", { roomId: "conference-1", username: "VoiceTester-2" });
+      }
+    });
+
+    // Client 1 checks for Client 2 leaving main-office
+    client1.on("participantLeft", (data) => {
+      if (data.id === client2.id && data.roomId === "main-office") {
+        client2LeftReceived = true;
+        checkComplete();
+      }
+    });
+
+    // Client 2 verifies receiving roomParticipants for conference-1
+    client2.on("roomParticipants", (data) => {
+      if (data.roomId === "conference-1") {
+        const foundSelf = data.participants.some((p) => p.id === client2.id);
+        if (foundSelf) {
+          client2NewRoomConfirmed = true;
+          checkComplete();
+        }
+      }
+    });
+
+    function checkComplete() {
+      if (client2JoinedReceived && client2LeftReceived && client2NewRoomConfirmed) {
+        clearTimeout(timeout);
+        client1.disconnect();
+        client2.disconnect();
+        resolve(true);
+      }
+    }
+
+    client1.on("connect_error", (e) => reject(e));
+    client2.on("connect_error", (e) => reject(e));
   });
 }
 
@@ -193,7 +243,6 @@ async function runTest() {
     if (text) console.error(`[SERVER STDERR]: ${text}`);
   });
 
-  // Allow server to spin up
   await new Promise((resolve) => setTimeout(resolve, 2000));
 
   try {
@@ -284,6 +333,16 @@ async function runTest() {
       hasErrors = true;
     }
 
+    // 9. Room Join/Leave Logic & Participant Updates for Voice
+    console.log("\n--- [9] Testing Room Join/Leave Logic & Participant Updates ---");
+    const roomSuccess = await testRoomJoinAndParticipantUpdates("http://localhost:5000");
+    if (roomSuccess) {
+      console.log("--> PASS: Room join, participantJoined, room switching, and participantLeft verified.");
+    } else {
+      console.error("--> FAIL: Room join/leave logic failed.");
+      hasErrors = true;
+    }
+
   } catch (err) {
     console.error("\n[TEST RUNNER EXCEPTION]:", err.message || err);
     hasErrors = true;
@@ -297,7 +356,7 @@ async function runTest() {
       console.error("\n❌ VERIFICATION FAILED: One or more tests did not pass.\n");
       process.exit(1);
     } else {
-      console.log("\n✅ ALL TESTS PASSED: Backend validation, socket events, and disconnection verified.\n");
+      console.log("\n✅ ALL TESTS PASSED: All 9 backend modules, room logic, and socket events verified.\n");
       process.exit(0);
     }
   }
