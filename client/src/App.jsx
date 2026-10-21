@@ -4,6 +4,8 @@ import "./App.css";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api/health";
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || new URL(API_URL).origin;
+const API_TIMEOUT_MS = 8000;
+const BACKEND_MAP_SIZE = 2000;
 const USERNAME_STORAGE_KEY = "proxispeak.username";
 const ROOM_BOUNDS = { minX: 8, maxX: 92, minY: 12, maxY: 88 };
 const INITIAL_POSITION = { x: 49, y: 57 };
@@ -40,12 +42,44 @@ function isValidPosition(position) {
   );
 }
 
+function toOfficePosition(position) {
+  if (!isValidPosition(position)) return null;
+  return clampPosition({
+    x: (position.x / BACKEND_MAP_SIZE) * 100,
+    y: (position.y / BACKEND_MAP_SIZE) * 100,
+  });
+}
+
+function normalizeParticipant(participant, ownSocketId) {
+  if (!participant || typeof participant.id !== "string") return null;
+  const name = typeof participant.name === "string"
+    ? participant.name
+    : typeof participant.username === "string"
+      ? participant.username
+      : "Guest";
+  const backendPosition = Number.isFinite(participant.x) && Number.isFinite(participant.y)
+    ? toOfficePosition({ x: participant.x, y: participant.y })
+    : isValidPosition(participant.position)
+      ? clampPosition(participant.position)
+      : null;
+
+  return {
+    id: participant.id,
+    name,
+    status: participant.status === "offline" ? "offline" : "online",
+    isYou: participant.id === ownSocketId,
+    position: backendPosition,
+    color: typeof participant.color === "string" ? participant.color : "",
+  };
+}
+
 function App() {
   const [started, setStarted] = useState(false);
   const [apiStatus, setApiStatus] = useState("loading");
   const [apiResponse, setApiResponse] = useState(null);
   const [apiError, setApiError] = useState("");
   const [username, setUsername] = useState(getSavedUsername);
+  const [isJoining, setIsJoining] = useState(false);
   const [position, setPosition] = useState(INITIAL_POSITION);
   const [isMuted, setIsMuted] = useState(false);
   const [socketStatus, setSocketStatus] = useState("idle");
@@ -55,11 +89,14 @@ function App() {
   const hasConnectedRef = useRef(false);
 
   const checkBackend = useCallback(async (signal) => {
-    setApiStatus("loading");
-    setApiError("");
+    const requestController = new AbortController();
+    const abortRequest = () => requestController.abort();
+    signal?.addEventListener("abort", abortRequest, { once: true });
+    const timeoutId = window.setTimeout(abortRequest, API_TIMEOUT_MS);
 
     try {
-      const response = await fetch(API_URL, { signal });
+      if (signal?.aborted) return false;
+      const response = await fetch(API_URL, { signal: requestController.signal });
       if (!response.ok) throw new Error(`HTTP error: ${response.status}`);
 
       const data = await response.json();
@@ -69,57 +106,105 @@ function App() {
 
       setApiResponse(data);
       setApiStatus("connected");
+      return true;
     } catch (error) {
-      if (error.name === "AbortError") return;
+      if (signal?.aborted) return false;
       setApiStatus("disconnected");
       setApiResponse(null);
-      setApiError(error.message);
+      setApiError(error.name === "AbortError" ? "The backend did not respond in time." : error.message);
+      return false;
+    } finally {
+      window.clearTimeout(timeoutId);
+      signal?.removeEventListener("abort", abortRequest);
     }
   }, []);
 
   useEffect(() => {
     const controller = new AbortController();
-    checkBackend(controller.signal);
+    void Promise.resolve().then(() => {
+      if (!controller.signal.aborted) return checkBackend(controller.signal);
+      return undefined;
+    });
     return () => controller.abort();
   }, [checkBackend]);
 
+  const setLocalParticipant = useCallback((status) => {
+    const id = socketRef.current?.id || "you";
+    setParticipants((current) => {
+      const existing = current.find((participant) => participant.id === id || participant.isYou);
+      const localParticipant = {
+        ...existing,
+        id,
+        name: username,
+        status,
+        isYou: true,
+        position: existing?.position || null,
+        color: existing?.color || "",
+      };
+      return [
+        ...current.filter((participant) => participant.id !== id && !participant.isYou),
+        localParticipant,
+      ];
+    });
+  }, [username]);
+
   useEffect(() => {
-    if (!started) {
-      setSocketStatus("idle");
-      setSocketError("");
-      setParticipants([]);
-      return undefined;
-    }
+    if (!started) return undefined;
 
     const socket = io(SOCKET_URL, {
       autoConnect: false,
       auth: { username },
+      transports: ["websocket", "polling"],
       reconnection: true,
+      reconnectionAttempts: 5,
       reconnectionDelay: 800,
       reconnectionDelayMax: 5000,
       timeout: 10000,
     });
     socketRef.current = socket;
     hasConnectedRef.current = false;
-    setSocketStatus(window.navigator.onLine ? "connecting" : "offline");
-    setSocketError("");
 
     const handleConnect = () => {
       hasConnectedRef.current = true;
       setSocketStatus("connected");
       setSocketError("");
       setLocalParticipant("online");
+      socket.emit("join", { username });
     };
-    const handleParticipantsUpdate = (nextParticipants) => {
+    const handleParticipantsSnapshot = (payload) => {
+      const nextParticipants = Array.isArray(payload) ? payload : payload?.participants;
       if (!Array.isArray(nextParticipants)) return;
-      setParticipants(nextParticipants
-        .filter((participant) => participant && typeof participant.id === "string" && typeof participant.name === "string")
-        .map((participant) => ({
-          id: participant.id,
-          name: participant.name,
-          status: participant.status === "online" ? "online" : "offline",
-          isYou: participant.id === socket.id,
-        })));
+      const normalized = nextParticipants
+        .map((participant) => normalizeParticipant(participant, socket.id))
+        .filter(Boolean)
+        .map((participant) => participant.isYou ? { ...participant, name: username } : participant);
+      setParticipants(normalized);
+    };
+    const handleParticipantJoined = (participant) => {
+      const normalized = normalizeParticipant(participant, socket.id);
+      if (!normalized) return;
+      setParticipants((current) => [
+        ...current.filter((person) => person.id !== normalized.id),
+        normalized,
+      ]);
+    };
+    const handleParticipantLeft = (participant) => {
+      if (typeof participant?.id !== "string") return;
+      setParticipants((current) => current.filter((person) => person.id !== participant.id));
+    };
+    const handlePositionUpdate = (update) => {
+      const normalized = normalizeParticipant(update, socket.id);
+      if (!normalized?.position) return;
+      setParticipants((current) => {
+        const exists = current.some((person) => person.id === normalized.id);
+        if (!exists) return [...current, normalized];
+        return current.map((person) => person.id === normalized.id
+          ? { ...person, name: normalized.name || person.name, position: normalized.position }
+          : person);
+      });
+    };
+    const handleSocketValidationError = (error) => {
+      setSocketError(error?.message || "The backend rejected a real-time update.");
     };
     const handleDisconnect = (reason) => {
       const status = !window.navigator.onLine ? "offline" : socket.active ? (hasConnectedRef.current ? "reconnecting" : "connecting") : "disconnected";
@@ -137,6 +222,11 @@ function App() {
       const status = !window.navigator.onLine ? "offline" : hasConnectedRef.current ? "reconnecting" : "connecting";
       setSocketStatus(status);
       setLocalParticipant(status === "offline" ? status : "connecting");
+    };
+    const handleReconnectFailed = () => {
+      setSocketStatus("disconnected");
+      setSocketError("Could not connect to the office server. Retry when it is available.");
+      setLocalParticipant("offline");
     };
     const handleOffline = () => {
       setSocketStatus("offline");
@@ -157,49 +247,96 @@ function App() {
     socket.on("connect", handleConnect);
     socket.on("disconnect", handleDisconnect);
     socket.on("connect_error", handleConnectError);
-    socket.on("participants:update", handleParticipantsUpdate);
+    socket.on("roomParticipants", handleParticipantsSnapshot);
+    socket.on("currentUsers", handleParticipantsSnapshot);
+    socket.on("participants:update", handleParticipantsSnapshot);
+    socket.on("participantJoined", handleParticipantJoined);
+    socket.on("userJoined", handleParticipantJoined);
+    socket.on("participantLeft", handleParticipantLeft);
+    socket.on("userDisconnected", handleParticipantLeft);
+    socket.on("userLeft", handleParticipantLeft);
+    socket.on("userPositionUpdated", handlePositionUpdate);
+    socket.on("error:validation", handleSocketValidationError);
     socket.io.on("reconnect_attempt", handleReconnectAttempt);
+    socket.io.on("reconnect_failed", handleReconnectFailed);
     window.addEventListener("offline", handleOffline);
     window.addEventListener("online", handleOnline);
-    setLocalParticipant(window.navigator.onLine ? "connecting" : "offline");
     if (window.navigator.onLine) socket.connect();
 
     return () => {
       socket.off("connect", handleConnect);
       socket.off("disconnect", handleDisconnect);
       socket.off("connect_error", handleConnectError);
-      socket.off("participants:update", handleParticipantsUpdate);
+      socket.off("roomParticipants", handleParticipantsSnapshot);
+      socket.off("currentUsers", handleParticipantsSnapshot);
+      socket.off("participants:update", handleParticipantsSnapshot);
+      socket.off("participantJoined", handleParticipantJoined);
+      socket.off("userJoined", handleParticipantJoined);
+      socket.off("participantLeft", handleParticipantLeft);
+      socket.off("userDisconnected", handleParticipantLeft);
+      socket.off("userLeft", handleParticipantLeft);
+      socket.off("userPositionUpdated", handlePositionUpdate);
+      socket.off("error:validation", handleSocketValidationError);
       socket.io.off("reconnect_attempt", handleReconnectAttempt);
+      socket.io.off("reconnect_failed", handleReconnectFailed);
       window.removeEventListener("offline", handleOffline);
       window.removeEventListener("online", handleOnline);
       socket.disconnect();
       if (socketRef.current === socket) socketRef.current = null;
     };
-  }, [started, username]);
+  }, [started, username, setLocalParticipant]);
 
-  function setLocalParticipant(status) {
-    setParticipants([
-      { id: socketRef.current?.id || "you", name: username, status, isYou: true },
-    ]);
-  }
+  useEffect(() => {
+    const socket = socketRef.current;
+    if (!started || socketStatus !== "connected" || !socket?.connected) return;
+    socket.emit("updatePosition", {
+      x: Math.round(position.x * (BACKEND_MAP_SIZE / 100)),
+      y: Math.round(position.y * (BACKEND_MAP_SIZE / 100)),
+    });
+  }, [position, socketStatus, started]);
 
   const updatePosition = useCallback((nextPosition) => {
     if (!isValidPosition(nextPosition)) return;
     setPosition(clampPosition(nextPosition));
   }, []);
 
-  function enterOffice(event) {
+  async function enterOffice(event) {
     event.preventDefault();
     const cleanUsername = username.trim().replace(/\s+/g, " ");
-    if (!cleanUsername) return;
+    if (!cleanUsername || isJoining) return;
     setUsername(cleanUsername);
     try {
       window.localStorage.setItem(USERNAME_STORAGE_KEY, cleanUsername);
     } catch {
       // The current session can still use the name when storage is unavailable.
     }
-    setSocketStatus("connecting");
-    setStarted(true);
+    setIsJoining(true);
+    setApiStatus("loading");
+    setApiError("");
+    try {
+      const backendIsReady = await checkBackend();
+      if (!backendIsReady) return;
+      const connectionStatus = window.navigator.onLine ? "connecting" : "offline";
+      setSocketStatus(connectionStatus);
+      setSocketError(window.navigator.onLine ? "" : "Your device is offline.");
+      setLocalParticipant(connectionStatus);
+      setStarted(true);
+    } finally {
+      setIsJoining(false);
+    }
+  }
+
+  function leaveOffice() {
+    setStarted(false);
+    setSocketStatus("idle");
+    setSocketError("");
+    setParticipants([]);
+  }
+
+  function retryBackend() {
+    setApiStatus("loading");
+    setApiError("");
+    void checkBackend();
   }
 
   const connectionStatus = started ? socketStatus : apiStatus;
@@ -218,7 +355,7 @@ function App() {
       <header className="navbar">
         <button
           className="brand brand-button"
-          onClick={() => setStarted(false)}
+          onClick={leaveOffice}
           aria-label="Go to ProxiSpeak home"
         >
           <span className="brand-icon" aria-hidden="true">◉</span>
@@ -250,16 +387,18 @@ function App() {
           onRetryConnection={() => socketRef.current?.connect()}
           isMuted={isMuted}
           onToggleMute={() => setIsMuted((muted) => !muted)}
-          onLeave={() => setStarted(false)}
+          onLeave={leaveOffice}
         />
       ) : (
         <Home
           apiStatus={apiStatus}
           apiResponse={apiResponse}
           apiError={apiError}
+          isJoining={isJoining}
           username={username}
           onUsernameChange={setUsername}
           onJoin={enterOffice}
+          onRetryBackend={retryBackend}
         />
       )}
 
@@ -270,7 +409,7 @@ function App() {
   );
 }
 
-function Home({ apiStatus, apiResponse, apiError, username, onUsernameChange, onJoin }) {
+function Home({ apiStatus, apiResponse, apiError, isJoining, username, onUsernameChange, onJoin, onRetryBackend }) {
   return (
     <main className="hero">
       <div className="hero-icon"><span aria-hidden="true">◉</span></div>
@@ -283,10 +422,16 @@ function Home({ apiStatus, apiResponse, apiError, username, onUsernameChange, on
       <div className="status-card">
         <div className="status-row">
           <span>Backend Connection</span>
-          <strong className={apiStatus}>{apiStatus === "loading" ? "Checking..." : apiStatus === "connected" ? "Connected" : "Disconnected"}</strong>
+          <div className="backend-status-actions">
+            <strong className={apiStatus} role="status" aria-live="polite">{apiStatus === "loading" ? "Checking..." : apiStatus === "connected" ? "Connected" : "Disconnected"}</strong>
+            {apiStatus === "disconnected" && <button className="api-retry" onClick={onRetryBackend} type="button">Retry</button>}
+          </div>
         </div>
         <div className="status-row">
-          <span>Application Status</span><strong className="ready">Ready to join</strong>
+          <span>Application Status</span>
+          <strong className={apiStatus === "connected" ? "ready" : apiStatus}>
+            {apiStatus === "loading" ? "Checking backend" : apiStatus === "connected" ? "Ready to join" : "Waiting for backend"}
+          </strong>
         </div>
         {apiResponse && <div className="api-details"><p>Backend API Response</p><pre>{JSON.stringify(apiResponse, null, 2)}</pre></div>}
         {apiStatus === "disconnected" && <p className="api-error" role="alert">Backend unavailable: {apiError}</p>}
@@ -308,8 +453,8 @@ function Home({ apiStatus, apiResponse, apiError, username, onUsernameChange, on
           />
         </label>
         <p className="username-hint">This name appears above your avatar.</p>
-        <button className="start-button" type="submit">
-          Enter virtual office <span aria-hidden="true">→</span>
+        <button className="start-button" type="submit" disabled={isJoining || apiStatus === "loading" || !username.trim()}>
+          {isJoining ? "Checking backend..." : apiStatus === "disconnected" ? "Retry & enter office" : "Enter virtual office"} <span aria-hidden="true">→</span>
         </button>
       </form>
       <p className="footer-note">A little space to work together, wherever you are.</p>
@@ -387,6 +532,20 @@ export function VirtualOffice({ position, onPositionChange, username, connection
           <div className="desk desk-two"><span className="monitor" /><span className="keyboard" /><span className="plant-pot" /></div>
           <div className="sofa"><span /><span /><i /></div>
           <div className="rug" />
+
+          {participants.filter((participant) => !participant.isYou && participant.position && participant.status === "online").map((participant) => (
+            <div
+              className="office-mate"
+              key={participant.id}
+              style={{ left: `${participant.position.x}%`, top: `${participant.position.y}%` }}
+              role="img"
+              aria-label={`${participant.name}'s avatar`}
+            >
+              <span className="mate-status">Online</span>
+              <span className="mate-avatar" style={participant.color ? { background: participant.color } : undefined}>{getInitials(participant.name)}</span>
+              <span className="mate-name">{participant.name}</span>
+            </div>
+          ))}
 
           <div
             className="my-avatar-wrap"

@@ -132,6 +132,10 @@ kbd { display:inline-grid; place-items:center; width:16px; height:15px; color:#d
 .participant-status.connecting { color:#e2bd71; }.participant-status.connecting i { background:#e2bd71; animation:pulse 1.2s infinite; }
 .participants-empty { margin:9px 0 0; color:#898490; font-size:9px; }
 .footer { flex:none; text-align:center; padding:17px 20px; border-top:1px solid var(--line); color:#706c77; font-size:10px; }
+.backend-status-actions { display:flex; align-items:center; gap:9px; }
+.api-retry { padding:4px 8px; color:#d6c7ff; background:#a68bfa17; border:1px solid #a68bfa44; border-radius:6px; font:inherit; font-size:10px; cursor:pointer; }
+.api-retry:hover { background:#a68bfa2c; }
+.start-button:disabled { cursor:wait; opacity:.62; transform:none; box-shadow:none; }
 @keyframes pulse { 50% { opacity:.4; } }
 
 @media (max-width:700px) {
