@@ -1,11 +1,11 @@
-const http = require("http");
+
 const { spawn } = require("child_process");
 const { io } = require("socket.io-client");
 
 async function checkUrl(url) {
   const res = await fetch(url);
-  const text = await res.text();
-  return { status: res.status, body: text };
+  const body = await res.text();
+  return { status: res.status, body };
 }
 
 async function testSocketPingPong(serverUrl) {
@@ -17,112 +17,198 @@ async function testSocketPingPong(serverUrl) {
 
     const timeout = setTimeout(() => {
       socket.disconnect();
-      reject(new Error("Socket.IO pong response timed out after 5000ms"));
+      reject(new Error("Socket.IO pong response timed out"));
     }, 5000);
 
     socket.on("connect", () => {
-      console.log(`[TEST CLIENT]: Connected with socket id: ${socket.id}`);
-      console.log("[TEST CLIENT]: Emitting 'ping' event to server...");
-      socket.emit("ping", { message: "ping from test client", sentAt: Date.now() });
+      socket.emit("ping", {
+        message: "ping from test client",
+        sentAt: Date.now(),
+      });
     });
 
     socket.on("pong", (data) => {
       clearTimeout(timeout);
-      console.log("[TEST CLIENT]: Received 'pong' event response from server:", JSON.stringify(data));
       socket.disconnect();
       resolve(data);
     });
 
-    socket.on("connect_error", (err) => {
+    socket.on("connect_error", (error) => {
       clearTimeout(timeout);
       socket.disconnect();
-      reject(err);
+      reject(error);
+    });
+  });
+}
+
+async function testMultiClientPositionSync(serverUrl) {
+  return new Promise((resolve, reject) => {
+    const client1 = io(serverUrl, { timeout: 5000 });
+    const client2 = io(serverUrl, { timeout: 5000 });
+
+    let client1Connected = false;
+    let client2Connected = false;
+    let testStarted = false;
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      client1.disconnect();
+      client2.disconnect();
+    };
+
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error("Multi-client position test timed out"));
+    }, 8000);
+
+    function checkAndMove() {
+      if (
+        client1Connected &&
+        client2Connected &&
+        !testStarted
+      ) {
+        testStarted = true;
+        client1.emit("updatePosition", { x: 30, y: 40 });
+      }
+    }
+
+    client1.on("connect", () => {
+      client1Connected = true;
+      checkAndMove();
+    });
+
+    client2.on("connect", () => {
+      client2Connected = true;
+      checkAndMove();
+    });
+
+    client2.on("userPositionUpdated", (data) => {
+      if (
+        data.id === client1.id &&
+        data.x === 30 &&
+        data.y === 40
+      ) {
+        cleanup();
+        resolve(true);
+      }
+    });
+
+    client1.on("connect_error", (error) => {
+      cleanup();
+      reject(error);
+    });
+
+    client2.on("connect_error", (error) => {
+      cleanup();
+      reject(error);
     });
   });
 }
 
 async function runTest() {
   let hasErrors = false;
+
   console.log("Starting server process...");
+
   const server = spawn("node", ["src/index.js"], {
     cwd: __dirname,
-    stdio: ["pipe", "pipe", "pipe"],
+    stdio: ["ignore", "pipe", "pipe"],
   });
 
   server.stdout.on("data", (data) => {
-    console.log(`[SERVER STDOUT]: ${data.toString().trim()}`);
+    console.log(`[SERVER]: ${data.toString().trim()}`);
   });
 
   server.stderr.on("data", (data) => {
-    console.error(`[SERVER STDERR]: ${data.toString().trim()}`);
+    console.error(`[SERVER ERROR]: ${data.toString().trim()}`);
   });
 
-  // Allow server to spin up
-  await new Promise((resolve) => setTimeout(resolve, 2000));
-
   try {
-    console.log("\n--- Testing Route 1: GET http://localhost:5000/ ---");
-    const rootRes = await checkUrl("http://localhost:5000/");
-    console.log(`Status: ${rootRes.status}`);
-    console.log(`Body: ${rootRes.body}`);
+    // Wait for the server to start.
+    await new Promise((resolve) => setTimeout(resolve, 2500));
 
-    if (rootRes.status === 200 && rootRes.body === "ProxiSpeak Backend is running!") {
-      console.log("--> PASS: Root endpoint verified.");
-    } else {
-      console.error("--> FAIL: Root endpoint unexpected response.");
-      hasErrors = true;
+    if (server.exitCode !== null) {
+      throw new Error("Server exited before tests could start.");
     }
 
-    console.log("\n--- Testing Route 2: GET http://localhost:5000/api/health ---");
-    const healthRes = await checkUrl("http://localhost:5000/api/health");
-    console.log(`Status: ${healthRes.status}`);
-    console.log(`Body: ${healthRes.body}`);
+    console.log("\n--- Test 1: Root endpoint ---");
+    const root = await checkUrl("http://localhost:5000/");
 
-    const healthJson = JSON.parse(healthRes.body);
-    if (healthRes.status === 200 && healthJson.status === "OK" && healthJson.project === "ProxiSpeak") {
-      console.log("--> PASS: Health check endpoint verified.");
+    if (
+      root.status === 200 &&
+      root.body === "ProxiSpeak Backend is running!"
+    ) {
+      console.log("PASS: Root endpoint");
     } else {
-      console.error("--> FAIL: Health check endpoint unexpected response.");
-      hasErrors = true;
+      throw new Error("Root endpoint test failed.");
     }
 
-    console.log("\n--- Testing Route 3: GET http://localhost:5000/api/status ---");
-    const statusRes = await checkUrl("http://localhost:5000/api/status");
-    console.log(`Status: ${statusRes.status}`);
-    console.log(`Body: ${statusRes.body}`);
+    console.log("\n--- Test 2: Health endpoint ---");
+    const health = await checkUrl(
+      "http://localhost:5000/api/health"
+    );
+    const healthJson = JSON.parse(health.body);
 
-    const statusJson = JSON.parse(statusRes.body);
-    if (statusRes.status === 200 && statusJson.status === "active") {
-      console.log("--> PASS: Status endpoint verified.");
+    if (
+      health.status === 200 &&
+      healthJson.status === "OK" &&
+      healthJson.project === "ProxiSpeak"
+    ) {
+      console.log("PASS: Health endpoint");
     } else {
-      console.error("--> FAIL: Status endpoint unexpected response.");
-      hasErrors = true;
+      throw new Error("Health endpoint test failed.");
     }
 
-    console.log("\n--- Testing Route 4: Socket.IO Ping-Pong Event ---");
-    const pongResponse = await testSocketPingPong("http://localhost:5000");
-    if (pongResponse) {
-      console.log("--> PASS: Socket.IO ping/pong event exchange verified successfully.");
+    console.log("\n--- Test 3: Status endpoint ---");
+    const status = await checkUrl(
+      "http://localhost:5000/api/status"
+    );
+    const statusJson = JSON.parse(status.body);
+
+    if (status.status === 200 && statusJson.status === "active") {
+      console.log("PASS: Status endpoint");
     } else {
-      console.error("--> FAIL: Socket.IO ping/pong did not return expected response.");
-      hasErrors = true;
+      throw new Error("Status endpoint test failed.");
     }
 
-  } catch (err) {
-    console.error("Verification encountered an error:", err);
+    console.log("\n--- Test 4: Socket.IO ping-pong ---");
+    const pong = await testSocketPingPong(
+      "http://localhost:5000"
+    );
+
+    if (pong) {
+      console.log("PASS: Socket.IO ping-pong");
+    } else {
+      throw new Error("Ping-pong test failed.");
+    }
+
+    console.log("\n--- Test 5: Multi-client position sync ---");
+    const synced = await testMultiClientPositionSync(
+      "http://localhost:5000"
+    );
+
+    if (synced) {
+      console.log("PASS: Multi-client position synchronization");
+    } else {
+      throw new Error("Position synchronization test failed.");
+    }
+  } catch (error) {
+    console.error("\nTEST ERROR:", error.message);
     hasErrors = true;
   } finally {
-    console.log("\nShutting down test server...");
-    server.kill("SIGTERM");
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    console.log("Server stopped successfully.");
+    console.log("\nStopping test server...");
+
+    if (server.exitCode === null && !server.killed) {
+      server.kill("SIGTERM");
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 500));
 
     if (hasErrors) {
-      console.error("\n❌ TESTS FAILED");
-      process.exit(1);
+      console.error("\nTESTS FAILED");
+      process.exitCode = 1;
     } else {
-      console.log("\n✅ ALL TESTS PASSED");
-      process.exit(0);
+      console.log("\nALL TESTS PASSED");
     }
   }
 }
