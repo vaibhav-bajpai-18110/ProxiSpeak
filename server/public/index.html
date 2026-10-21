@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ProxiSpeak - Real-Time Rooms & Avatar Movement Demo</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #0f172a;
+      color: #f8fafc;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 1.5rem;
+    }
+    header {
+      width: 100%;
+      max-width: 960px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1rem;
+    }
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, #60a5fa, #a78bfa);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .status-badge {
+      padding: 0.35rem 0.75rem;
+      border-radius: 9999px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: #1e293b;
+      border: 1px solid #334155;
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #ef4444;
+    }
+    .status-dot.connected {
+      background: #10b981;
+      box-shadow: 0 0 8px #10b981;
+    }
+    .main-container {
+      width: 100%;
+      max-width: 960px;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+    .hud-bar {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 1rem;
+      background: #1e293b;
+      padding: 0.75rem 1.25rem;
+      border-radius: 0.5rem;
+      border: 1px solid #334155;
+      font-size: 0.9rem;
+    }
+    .hud-group {
+      display: flex;
+      align-items: center;
+      gap: 1.25rem;
+    }
+    .hud-item {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+    .hud-label {
+      color: #94a3b8;
+    }
+    .hud-val {
+      font-weight: 600;
+      color: #f1f5f9;
+    }
+    .room-select {
+      background: #0f172a;
+      color: #38bdf8;
+      border: 1px solid #38bdf8;
+      padding: 0.35rem 0.75rem;
+      border-radius: 6px;
+      font-weight: 600;
+      font-size: 0.85rem;
+      cursor: pointer;
+      outline: none;
+    }
+    .layout-row {
+      display: grid;
+      grid-template-columns: 1fr 280px;
+      gap: 1rem;
+    }
+    .canvas-card {
+      position: relative;
+      background: #1e293b;
+      border-radius: 0.75rem;
+      border: 1px solid #334155;
+      overflow: hidden;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.4);
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      height: 480px;
+      background: #090d16;
+      cursor: crosshair;
+    }
+    .controls-hint {
+      position: absolute;
+      bottom: 12px;
+      left: 12px;
+      background: rgba(15, 23, 42, 0.85);
+      backdrop-filter: blur(4px);
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      color: #cbd5e1;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      pointer-events: none;
+    }
+    .side-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+    .panel-card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 0.75rem;
+      padding: 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+    .panel-title {
+      font-size: 0.9rem;
+      font-weight: 700;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .participant-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      max-height: 180px;
+      overflow-y: auto;
+    }
+    .participant-badge {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: #0f172a;
+      padding: 0.45rem 0.75rem;
+      border-radius: 6px;
+      border: 1px solid #334155;
+      font-size: 0.85rem;
+    }
+    .avatar-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+    }
+    .log-card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 0.75rem;
+      padding: 0.75rem 1rem;
+      font-size: 0.8rem;
+      max-height: 160px;
+      overflow-y: auto;
+      font-family: monospace;
+      flex-grow: 1;
+    }
+    .log-item {
+      padding: 2px 0;
+      color: #cbd5e1;
+    }
+    .log-time {
+      color: #64748b;
+      margin-right: 6px;
+    }
+    .log-highlight {
+      color: #38bdf8;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>ProxiSpeak — Rooms & Spatial Movement</h1>
+      <p style="color: #94a3b8; font-size: 0.85rem; margin-top: 2px;">
+        Room/join logic & participant updates for voice communication
+      </p>
+    </div>
+    <div class="status-badge">
+      <div id="statusDot" class="status-dot"></div>
+      <span id="statusText">Connecting...</span>
+    </div>
+  </header>
+
+  <div class="main-container">
+    <div class="hud-bar">
+      <div class="hud-group">
+        <div class="hud-item">
+          <span class="hud-label">Room:</span>
+          <select id="roomSelect" class="room-select">
+            <option value="main-office">🏢 Main Office</option>
+            <option value="meeting-room-a">🎙️ Meeting Room A</option>
+            <option value="meeting-room-b">🎙️ Meeting Room B</option>
+            <option value="lounge">☕ Lounge / Cafeteria</option>
+          </select>
+        </div>
+        <div class="hud-item">
+          <span class="hud-label">Position:</span>
+          <span id="hudMyPos" class="hud-val">(0, 0)</span>
+        </div>
+      </div>
+      <div class="hud-group">
+        <div class="hud-item">
+          <span class="hud-label">Your ID:</span>
+          <span id="hudMyId" class="hud-val">—</span>
+        </div>
+        <div class="hud-item">
+          <span class="hud-label">Room Participants:</span>
+          <span id="hudRoomCount" class="hud-val">1</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="layout-row">
+      <div class="canvas-card">
+        <canvas id="gameCanvas" width="660" height="480"></canvas>
+        <div class="controls-hint">
+          🎮 Move: <b>Arrow Keys</b>, <b>W A S D</b>, or <b>Click on Canvas</b>
+        </div>
+      </div>
+
+      <div class="side-panel">
+        <div class="panel-card">
+          <div class="panel-title">
+            <span>Room Members</span>
+            <span id="memberCountBadge" style="color: #38bdf8; font-size: 0.8rem;">1</span>
+          </div>
+          <div class="participant-list" id="participantList">
+            <!-- Dynamic participant badges rendered here -->
+          </div>
+        </div>
+
+        <div class="log-card" id="eventLog">
+          <div class="log-item"><span class="log-time">[System]</span> Initializing client...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const canvas = document.getElementById("gameCanvas");
+    const ctx = canvas.getContext("2d");
+    const statusDot = document.getElementById("statusDot");
+    const statusText = document.getElementById("statusText");
+    const hudMyId = document.getElementById("hudMyId");
+    const hudMyPos = document.getElementById("hudMyPos");
+    const hudRoomCount = document.getElementById("hudRoomCount");
+    const memberCountBadge = document.getElementById("memberCountBadge");
+    const participantList = document.getElementById("participantList");
+    const roomSelect = document.getElementById("roomSelect");
+    const eventLog = document.getElementById("eventLog");
+
+    function logEvent(msg, highlight = false) {
+      const time = new Date().toLocaleTimeString();
+      const div = document.createElement("div");
+      div.className = "log-item";
+      div.innerHTML = `<span class="log-time">[${time}]</span> <span class="${highlight ? 'log-highlight' : ''}">${msg}</span>`;
+      eventLog.appendChild(div);
+      eventLog.scrollTop = eventLog.scrollHeight;
+    }
+
+    const socket = io();
+
+    let myId = null;
+    let currentRoomId = "main-office";
+    let myUser = { x: 330, y: 240, color: "#3B82F6", username: "You", roomId: "main-office" };
+    const roomParticipantsMap = new Map();
+    const otherUsers = new Map();
+
+    const MOVE_SPEED = 8;
+    const keysDown = {};
+
+    socket.on("connect", () => {
+      myId = socket.id;
+      statusDot.classList.add("connected");
+      statusText.textContent = "Connected";
+      hudMyId.textContent = myId.slice(0, 8);
+      logEvent(`Connected to Socket.IO server (ID: ${myId})`, true);
+    });
+
+    socket.on("disconnect", () => {
+      statusDot.classList.remove("connected");
+      statusText.textContent = "Disconnected";
+      logEvent("Disconnected from server", false);
+    });
+
+    // Room Participants List Sync
+    socket.on("roomParticipants", (data) => {
+      currentRoomId = data.roomId;
+      roomSelect.value = currentRoomId;
+      roomParticipantsMap.clear();
+
+      data.participants.forEach((p) => {
+        roomParticipantsMap.set(p.id, p);
+        if (p.id === myId) {
+          myUser = { ...myUser, ...p, username: "You" };
+        } else {
+          otherUsers.set(p.id, p);
+        }
+      });
+
+      renderParticipantsList();
+      logEvent(`Joined room [${currentRoomId}] with ${data.participants.length} member(s)`, true);
+    });
+
+    // Participant joined room
+    socket.on("participantJoined", (user) => {
+      if (user.id !== myId) {
+        roomParticipantsMap.set(user.id, user);
+        otherUsers.set(user.id, user);
+        renderParticipantsList();
+        logEvent(`Participant joined room: ${user.username} (${user.id.slice(0, 5)})`);
+      }
+    });
+
+    // Participant left room
+    socket.on("participantLeft", (data) => {
+      if (roomParticipantsMap.has(data.id)) {
+        const u = roomParticipantsMap.get(data.id);
+        roomParticipantsMap.delete(data.id);
+        otherUsers.delete(data.id);
+        renderParticipantsList();
+        logEvent(`Participant left room: ${u?.username || data.id.slice(0, 5)}`);
+      }
+    });
+
+    // Global position update
+    socket.on("userPositionUpdated", (data) => {
+      if (otherUsers.has(data.id)) {
+        const u = otherUsers.get(data.id);
+        u.x = data.x;
+        u.y = data.y;
+        otherUsers.set(data.id, u);
+      } else if (data.id !== myId) {
+        otherUsers.set(data.id, {
+          id: data.id,
+          username: data.username || `User-${data.id.slice(0, 4)}`,
+          x: data.x,
+          y: data.y,
+          color: "#10B981"
+        });
+      }
+    });
+
+    socket.on("userDisconnected", (data) => {
+      const leftId = data && data.id ? data.id : data;
+      roomParticipantsMap.delete(leftId);
+      otherUsers.delete(leftId);
+      renderParticipantsList();
+    });
+
+    function renderParticipantsList() {
+      participantList.innerHTML = "";
+      const total = roomParticipantsMap.size || 1;
+      hudRoomCount.textContent = total;
+      memberCountBadge.textContent = `${total} online`;
+
+      // Render myself first
+      const myBadge = document.createElement("div");
+      myBadge.className = "participant-badge";
+      myBadge.innerHTML = `
+        <div class="avatar-dot" style="background: ${myUser.color}"></div>
+        <span style="font-weight: 600; color: #f8fafc;">You (${myId ? myId.slice(0, 5) : ""})</span>
+        <span style="margin-left: auto; font-size: 0.75rem; color: #10b981;">Self</span>
+      `;
+      participantList.appendChild(myBadge);
+
+      // Render other participants in room
+      roomParticipantsMap.forEach((p) => {
+        if (p.id !== myId) {
+          const badge = document.createElement("div");
+          badge.className = "participant-badge";
+          badge.innerHTML = `
+            <div class="avatar-dot" style="background: ${p.color || '#10B981'}"></div>
+            <span>${p.username || p.id.slice(0, 6)}</span>
+            <span style="margin-left: auto; font-size: 0.75rem; color: #94a3b8;">(${Math.round(p.x)}, ${Math.round(p.y)})</span>
+          `;
+          participantList.appendChild(badge);
+        }
+      });
+    }
+
+    // Room Switcher Change Listener
+    roomSelect.addEventListener("change", (e) => {
+      const targetRoom = e.target.value;
+      logEvent(`Switching to room: ${targetRoom}...`);
+      socket.emit("joinRoom", { roomId: targetRoom });
+    });
+
+    // Emit position change
+    function broadcastPosition() {
+      socket.emit("updatePosition", {
+        x: Math.round(myUser.x),
+        y: Math.round(myUser.y),
+      });
+      updateHud();
+    }
+
+    function updateHud() {
+      hudMyPos.textContent = `(${Math.round(myUser.x)}, ${Math.round(myUser.y)})`;
+    }
+
+    // Keyboard handlers
+    window.addEventListener("keydown", (e) => {
+      keysDown[e.key] = true;
+    });
+
+    window.addEventListener("keyup", (e) => {
+      keysDown[e.key] = false;
+    });
+
+    // Click to move
+    canvas.addEventListener("click", (e) => {
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+
+      myUser.x = Math.max(20, Math.min(canvas.width - 20, (e.clientX - rect.left) * scaleX));
+      myUser.y = Math.max(20, Math.min(canvas.height - 20, (e.clientY - rect.top) * scaleY));
+      broadcastPosition();
+    });
+
+    function handleInput() {
+      let moved = false;
+      if (keysDown["ArrowUp"] || keysDown["w"] || keysDown["W"]) {
+        myUser.y = Math.max(20, myUser.y - MOVE_SPEED);
+        moved = true;
+      }
+      if (keysDown["ArrowDown"] || keysDown["s"] || keysDown["S"]) {
+        myUser.y = Math.min(canvas.height - 20, myUser.y + MOVE_SPEED);
+        moved = true;
+      }
+      if (keysDown["ArrowLeft"] || keysDown["a"] || keysDown["A"]) {
+        myUser.x = Math.max(20, myUser.x - MOVE_SPEED);
+        moved = true;
+      }
+      if (keysDown["ArrowRight"] || keysDown["d"] || keysDown["D"]) {
+        myUser.x = Math.min(canvas.width - 20, myUser.x + MOVE_SPEED);
+        moved = true;
+      }
+
+      if (moved) {
+        broadcastPosition();
+      }
+    }
+
+    // Render loop
+    function drawGrid() {
+      ctx.strokeStyle = "#1e293b";
+      ctx.lineWidth = 1;
+      const gridSize = 40;
+      for (let x = 0; x < canvas.width; x += gridSize) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, canvas.height);
+        ctx.stroke();
+      }
+      for (let y = 0; y < canvas.height; y += gridSize) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(canvas.width, y);
+        ctx.stroke();
+      }
+    }
+
+    function drawAvatar(x, y, color, label, isMe) {
+      if (isMe) {
+        // Earshot proximity circle (100px)
+        ctx.beginPath();
+        ctx.arc(x, y, 100, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(59, 130, 246, 0.08)";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(59, 130, 246, 0.35)";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      ctx.beginPath();
+      ctx.arc(x, y, 18, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.strokeStyle = isMe ? "#ffffff" : "#0f172a";
+      ctx.lineWidth = isMe ? 3 : 2;
+      ctx.stroke();
+
+      ctx.font = isMe ? "bold 13px sans-serif" : "12px sans-serif";
+      ctx.fillStyle = "#ffffff";
+      ctx.textAlign = "center";
+      ctx.fillText(label, x, y - 26);
+
+      ctx.font = "10px monospace";
+      ctx.fillStyle = "#94a3b8";
+      ctx.fillText(`(${Math.round(x)}, ${Math.round(y)})`, x, y + 34);
+    }
+
+    function render() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      drawGrid();
+
+      // Draw other users
+      otherUsers.forEach((u) => {
+        drawAvatar(u.x, u.y, u.color || "#10B981", u.username || u.id.slice(0, 5), false);
+      });
+
+      // Draw my avatar
+      drawAvatar(myUser.x, myUser.y, myUser.color || "#3B82F6", "You", true);
+    }
+
+    function gameLoop() {
+      handleInput();
+      render();
+      requestAnimationFrame(gameLoop);
+    }
+
+    requestAnimationFrame(gameLoop);
+  </script>
+</body>
+</html>

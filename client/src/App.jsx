@@ -3,10 +3,28 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { io } from "socket.io-client";
 import "./App.css";
 
-const SERVER_URL = "http://localhost:5000";
-const API_URL = `${SERVER_URL}/api/health`;
+const API_URL =
+  import.meta.env.VITE_API_URL || "http://localhost:5000/api/health";
+const SOCKET_URL =
+  import.meta.env.VITE_SOCKET_URL || new URL(API_URL).origin;
+const MAP_SIZE = 2000;
+const USERNAME_KEY = "proxispeak.username";
+
 const ROOM_BOUNDS = { minX: 8, maxX: 92, minY: 12, maxY: 88 };
 const INITIAL_POSITION = { x: 49, y: 57 };
+
+function getSavedUsername() {
+  try {
+    return window.localStorage.getItem(USERNAME_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function getInitials(name = "") {
+  return name.trim().split(/\s+/).slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() || "").join("");
+}
 
 function clampPosition(position) {
   return {
@@ -20,154 +38,342 @@ function isValidPosition(position) {
     Number.isFinite(position.x) &&
     Number.isFinite(position.y);
 }
-console.log("PROXISPEAK APP LOADED");
+
+function normalizeUser(user, ownSocketId) {
+  if (!user || typeof user.id !== "string") return null;
+
+  const x = Number(user.x);
+  const y = Number(user.y);
+
+  return {
+    id: user.id,
+    username: typeof user.username === "string" ? user.username : "Guest",
+    x: Number.isFinite(x)
+      ? Math.min(92, Math.max(8, (x / MAP_SIZE) * 100))
+      : INITIAL_POSITION.x,
+    y: Number.isFinite(y)
+      ? Math.min(88, Math.max(12, (y / MAP_SIZE) * 100))
+      : INITIAL_POSITION.y,
+    color: typeof user.color === "string" ? user.color : "",
+    isYou: user.id === ownSocketId,
+  };
+}
+
 function App() {
   const [started, setStarted] = useState(false);
-  const [connected, setConnected] = useState(false);
-  const [message, setMessage] = useState("");
   const [apiStatus, setApiStatus] = useState("loading");
   const [apiResponse, setApiResponse] = useState(null);
   const [apiError, setApiError] = useState("");
+  const [username, setUsername] = useState(getSavedUsername);
+  const [isJoining, setIsJoining] = useState(false);
   const [position, setPosition] = useState(INITIAL_POSITION);
   const [remoteUsers, setRemoteUsers] = useState([]);
   const [isMuted, setIsMuted] = useState(false);
-
+  const [socketStatus, setSocketStatus] = useState("idle");
+  const [socketError, setSocketError] = useState("");
+  const [message, setMessage] = useState("");
   const socketRef = useRef(null);
+  const hasConnectedRef = useRef(false);
 
-  useEffect(() => {
-    const controller = new AbortController();
+  const checkBackend = useCallback(async (signal) => {
+    const requestController = new AbortController();
+    const abortRequest = () => requestController.abort();
+    signal?.addEventListener("abort", abortRequest, { once: true });
 
-    async function checkBackend() {
-      try {
-        const response = await fetch(API_URL, {
-          signal: controller.signal,
-        });
+    const timeoutId = window.setTimeout(abortRequest, 8000);
 
-        if (!response.ok) {
-          throw new Error(`HTTP error: ${response.status}`);
-        }
+    try {
+      if (signal?.aborted) return false;
 
-        const data = await response.json();
-        setApiResponse(data);
-        setApiStatus("connected");
-      } catch (error) {
-        if (error.name === "AbortError") return;
-        setApiResponse(null);
-        setApiStatus("disconnected");
-        setApiError(error.message);
+      const response = await fetch(API_URL, {
+        signal: requestController.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error: ${response.status}`);
       }
-    }
 
-    checkBackend();
-    return () => controller.abort();
+      const data = await response.json();
+
+      if (data.status !== "OK" || data.project !== "ProxiSpeak") {
+        throw new Error("Unexpected backend health response");
+      }
+
+      setApiResponse(data);
+      setApiStatus("connected");
+      setApiError("");
+      return true;
+    } catch (error) {
+      if (signal?.aborted) return false;
+
+      setApiResponse(null);
+      setApiStatus("disconnected");
+      setApiError(
+        error.name === "AbortError"
+          ? "The backend did not respond in time."
+          : error.message
+      );
+      return false;
+    } finally {
+      window.clearTimeout(timeoutId);
+      signal?.removeEventListener("abort", abortRequest);
+    }
   }, []);
 
   useEffect(() => {
-    if (!started) {
-      setConnected(false);
-      setRemoteUsers([]);
-      socketRef.current = null;
-      return;
+    const controller = new AbortController();
+    void checkBackend(controller.signal);
+    return () => controller.abort();
+  }, [checkBackend]);
+
+  const participants = [
+    {
+      id: socketRef.current?.id || "you",
+      username,
+      x: position.x,
+      y: position.y,
+      isYou: true,
+      color: "",
+    },
+    ...remoteUsers.filter((user) => user.id !== socketRef.current?.id),
+  ];
+
+  const enterOffice = async (event) => {
+    event.preventDefault();
+
+    const cleanUsername = username.trim().replace(/\s+/g, " ");
+    if (!cleanUsername || isJoining) return;
+
+    setUsername(cleanUsername);
+    try {
+      window.localStorage.setItem(USERNAME_KEY, cleanUsername);
+    } catch {
+      // The current session can continue without local storage.
     }
 
-    const socket = io(SERVER_URL);
+    setIsJoining(true);
+    setApiError("");
+
+    try {
+      const ready = await checkBackend();
+      if (!ready) return;
+
+      setSocketStatus("connecting");
+      setSocketError("");
+      setStarted(true);
+    } finally {
+      setIsJoining(false);
+    }
+  };
+
+  const leaveOffice = () => {
+    setStarted(false);
+    setSocketStatus("idle");
+    setSocketError("");
+    setRemoteUsers([]);
+    setMessage("");
+  };
+
+  const retryBackend = () => {
+    setApiStatus("loading");
+    setApiError("");
+    void checkBackend();
+  };
+
+  useEffect(() => {
+    if (!started) return undefined;
+
+    const socket = io(SOCKET_URL, {
+      autoConnect: false,
+      auth: { username },
+      transports: ["websocket", "polling"],
+      reconnection: true,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 800,
+      reconnectionDelayMax: 5000,
+      timeout: 10000,
+    });
+
     socketRef.current = socket;
+    hasConnectedRef.current = false;
 
-    function upsertUser(user) {
-      if (!user || !user.id || user.id === socket.id) return;
+    const upsertUser = (rawUser) => {
+      const user = normalizeUser(rawUser, socket.id);
+      if (!user || user.isYou) return;
 
-      setRemoteUsers((previous) => {
-        const index = previous.findIndex((item) => item.id === user.id);
-
-        if (index === -1) return [...previous, user];
-
-        return previous.map((item) =>
-          item.id === user.id ? { ...item, ...user } : item
-        );
+      setRemoteUsers((current) => {
+        const exists = current.some((item) => item.id === user.id);
+        return exists
+          ? current.map((item) =>
+              item.id === user.id ? { ...item, ...user } : item
+            )
+          : [...current, user];
       });
-    }
+    };
 
-    function removeUser(data) {
+    const removeUser = (data) => {
       const id = typeof data === "string" ? data : data?.id;
       if (!id) return;
 
-      setRemoteUsers((previous) =>
-        previous.filter((user) => user.id !== id)
+      setRemoteUsers((current) =>
+        current.filter((user) => user.id !== id)
       );
-    }
+    };
 
-    socket.on("connect", () => {
-      console.log("SOCKET CONNECTED:", socket.id);
-      setConnected(true);
+    const handleUsersSnapshot = (payload) => {
+      const list = Array.isArray(payload)
+        ? payload
+        : payload?.participants;
+
+      if (!Array.isArray(list)) return;
+
+      setRemoteUsers(
+        list
+          .map((user) => normalizeUser(user, socket.id))
+          .filter((user) => user && !user.isYou)
+      );
+    };
+
+    const handleConnect = () => {
+      hasConnectedRef.current = true;
+      setSocketStatus("connected");
+      setSocketError("");
       setMessage("Connected to ProxiSpeak backend!");
 
-      console.log("SENDING JOIN EVENT");
-      socket.emit("join", { username: "Vaibhav" });
-      socket.emit("ping", { message: "Hello from React frontend" });
-    });
+      socket.emit("join", { username });
+    };
 
-    socket.on("pong", (data) => {
-      setMessage(
-        typeof data === "object" ? data.message || "Pong received" : String(data)
+    const handleDisconnect = (reason) => {
+      setSocketStatus(
+        !window.navigator.onLine
+          ? "offline"
+          : hasConnectedRef.current
+            ? "reconnecting"
+            : "disconnected"
       );
-    });
+      setSocketError(reason || "Disconnected from backend.");
+    };
 
-    console.log("REGISTERING CURRENT USERS LISTENER");
-    socket.on("currentUsers", (users) => {
-      console.log("CURRENT USERS:", users);
-  console.log("CURRENT USERS:", users);
+    const handleConnectError = (error) => {
+      setSocketStatus(
+        !window.navigator.onLine
+          ? "offline"
+          : hasConnectedRef.current
+            ? "reconnecting"
+            : "disconnected"
+      );
+      setSocketError(error.message);
+    };
 
-  if (!Array.isArray(users)) return;
+    const handlePositionUpdate = (rawUser) => {
+      upsertUser(rawUser);
+    };
 
-  setRemoteUsers(users.filter((user) => user.id !== socket.id));
-});
+    const handleOffline = () => {
+      setSocketStatus("offline");
+      setSocketError("Your device is offline.");
+    };
 
-console.log("REGISTERING USER JOINED LISTENER");
-socket.on("userJoined", (user) => {
-  console.log("USER JOINED:", user);
-  upsertUser(user);
-});
+    const handleOnline = () => {
+      if (socket.connected) {
+        setSocketStatus("connected");
+      } else {
+        setSocketStatus("reconnecting");
+        socket.connect();
+      }
+    };
 
+    const handleValidationError = (error) => {
+      setSocketError(
+        error?.message || "The backend rejected an update."
+      );
+    };
+
+    socket.on("connect", handleConnect);
+    socket.on("disconnect", handleDisconnect);
+    socket.on("connect_error", handleConnectError);
+
+    socket.on("currentUsers", handleUsersSnapshot);
+    socket.on("roomParticipants", handleUsersSnapshot);
     socket.on("userJoined", upsertUser);
-    socket.on("userPositionUpdated", upsertUser);
-    socket.on("userMoved", upsertUser);
+    socket.on("participantJoined", upsertUser);
+    socket.on("userPositionUpdated", handlePositionUpdate);
+    socket.on("userMoved", handlePositionUpdate);
 
     socket.on("userDisconnected", removeUser);
     socket.on("userLeft", removeUser);
+    socket.on("participantLeft", removeUser);
+    socket.on("error:validation", handleValidationError);
 
-    socket.on("disconnect", () => {
-      setConnected(false);
-      setMessage("Disconnected from backend.");
-    });
+    window.addEventListener("offline", handleOffline);
+    window.addEventListener("online", handleOnline);
 
-    socket.on("connect_error", () => {
-      setConnected(false);
-      setMessage("Unable to connect. Is the backend running?");
-    });
+    if (window.navigator.onLine) {
+      socket.connect();
+    } else {
+      handleOffline();
+    }
 
     return () => {
+      socket.off("connect", handleConnect);
+      socket.off("disconnect", handleDisconnect);
+      socket.off("connect_error", handleConnectError);
+
+      socket.off("currentUsers", handleUsersSnapshot);
+      socket.off("roomParticipants", handleUsersSnapshot);
+      socket.off("userJoined", upsertUser);
+      socket.off("participantJoined", upsertUser);
+      socket.off("userPositionUpdated", handlePositionUpdate);
+      socket.off("userMoved", handlePositionUpdate);
+
+      socket.off("userDisconnected", removeUser);
+      socket.off("userLeft", removeUser);
+      socket.off("participantLeft", removeUser);
+      socket.off("error:validation", handleValidationError);
+
+      window.removeEventListener("offline", handleOffline);
+      window.removeEventListener("online", handleOnline);
+
       socket.disconnect();
-      socketRef.current = null;
+      if (socketRef.current === socket) socketRef.current = null;
     };
-  }, [started]);
+  }, [started, username]);
+
+  useEffect(() => {
+    const socket = socketRef.current;
+    if (!started || socketStatus !== "connected" || !socket?.connected) {
+      return;
+    }
+
+    socket.emit("updatePosition", {
+      x: Math.round(position.x * (MAP_SIZE / 100)),
+      y: Math.round(position.y * (MAP_SIZE / 100)),
+    });
+  }, [position, socketStatus, started]);
 
   const updatePosition = useCallback((nextPosition) => {
     if (!isValidPosition(nextPosition)) return;
     setPosition(clampPosition(nextPosition));
   }, []);
 
-  useEffect(() => {
-    if (!started || !connected || !socketRef.current) return;
+  const connectionStatus = started ? socketStatus : apiStatus;
 
-    socketRef.current.emit("updatePosition", position);
-  }, [position, started, connected]);
+  const connectionLabel = {
+    idle: "Not connected",
+    loading: "Checking backend...",
+    connected: "Connected",
+    connecting: "Connecting",
+    reconnecting: "Reconnecting",
+    disconnected: "Disconnected",
+    offline: "Offline",
+  }[connectionStatus] || "Checking connection...";
 
   return (
     <div className="app">
       <header className="navbar">
         <button
           className="brand brand-button"
-          onClick={() => setStarted(false)}
+          onClick={leaveOffice}
           aria-label="Go to ProxiSpeak home"
         >
           <span className="brand-icon" aria-hidden="true">P</span>
@@ -181,10 +387,20 @@ socket.on("userJoined", (user) => {
             </span>
           )}
 
-          <span className={`nav-status ${connected ? "connected" : "disconnected"}`}>
-            <span className={`status-dot ${connected ? "connected" : "disconnected"}`} />
-            {connected ? "Connected" : "Not connected"}
+          <span
+            className={`nav-status ${connectionStatus}`}
+            role="status"
+            aria-live="polite"
+          >
+            <span className={`status-dot ${connectionStatus}`} />
+            {connectionLabel}
           </span>
+
+          {started && (
+            <span className="avatar-small" title={username}>
+              {getInitials(username)}
+            </span>
+          )}
         </div>
       </header>
 
@@ -192,19 +408,26 @@ socket.on("userJoined", (user) => {
         <VirtualOffice
           position={position}
           remoteUsers={remoteUsers}
+          participants={participants}
+          username={username}
+          connectionStatus={socketStatus}
+          connectionError={socketError}
           onPositionChange={updatePosition}
+          onRetryConnection={() => socketRef.current?.connect()}
           isMuted={isMuted}
           onToggleMute={() => setIsMuted((value) => !value)}
-          onLeave={() => setStarted(false)}
+          onLeave={leaveOffice}
         />
       ) : (
         <Home
           apiStatus={apiStatus}
           apiResponse={apiResponse}
           apiError={apiError}
-          connected={connected}
-          message={message}
-          onStart={() => setStarted(true)}
+          isJoining={isJoining}
+          username={username}
+          onUsernameChange={setUsername}
+          onJoin={enterOffice}
+          onRetryBackend={retryBackend}
         />
       )}
 
@@ -215,7 +438,16 @@ socket.on("userJoined", (user) => {
   );
 }
 
-function Home({ apiStatus, apiResponse, apiError, connected, message, onStart }) {
+function Home({
+  apiStatus,
+  apiResponse,
+  apiError,
+  isJoining,
+  username,
+  onUsernameChange,
+  onJoin,
+  onRetryBackend,
+}) {
   return (
     <main className="hero">
       <div className="hero-icon" aria-hidden="true">P</div>
@@ -229,17 +461,35 @@ function Home({ apiStatus, apiResponse, apiError, connected, message, onStart })
 
       <div className="status-card">
         <div className="status-row">
-          <span>Backend API</span>
-          <strong className={apiStatus}>
-            {apiStatus === "loading" ? "Checking..." :
-              apiStatus === "connected" ? "Connected" : "Disconnected"}
-          </strong>
+          <span>Backend Connection</span>
+          <div className="backend-status-actions">
+            <strong className={apiStatus} role="status" aria-live="polite">
+              {apiStatus === "loading"
+                ? "Checking..."
+                : apiStatus === "connected"
+                  ? "Connected"
+                  : "Disconnected"}
+            </strong>
+            {apiStatus === "disconnected" && (
+              <button
+                className="api-retry"
+                onClick={onRetryBackend}
+                type="button"
+              >
+                Retry
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="status-row">
-          <span>Socket.IO</span>
-          <strong className={connected ? "ready" : "disconnected"}>
-            {connected ? "Connected" : "Disconnected"}
+          <span>Application Status</span>
+          <strong className={apiStatus === "connected" ? "ready" : apiStatus}>
+            {apiStatus === "loading"
+              ? "Checking backend"
+              : apiStatus === "connected"
+                ? "Ready to join"
+                : "Waiting for backend"}
           </strong>
         </div>
 
@@ -254,11 +504,33 @@ function Home({ apiStatus, apiResponse, apiError, connected, message, onStart })
         )}
       </div>
 
-      <button className="start-button" onClick={onStart}>
-        Enter virtual office →
-      </button>
+      <form className="join-form" onSubmit={onJoin}>
+        <label className="username-field">
+          <span>Your display name</span>
+          <input
+            autoComplete="nickname"
+            maxLength={24}
+            name="username"
+            onChange={(event) => onUsernameChange(event.target.value)}
+            placeholder="Enter your display name"
+            required
+            value={username}
+          />
+        </label>
 
-      {message && <p className="feedback">{message}</p>}
+        <p className="username-hint">
+          This name appears above your avatar.
+        </p>
+
+        <button
+          className="start-button"
+          type="submit"
+          disabled={isJoining || apiStatus === "loading" || !username.trim()}
+        >
+          {isJoining ? "Checking backend..." : "Enter virtual office"}
+          <span aria-hidden="true"> →</span>
+        </button>
+      </form>
 
       <p className="footer-note">
         A little space to work together, wherever you are.
@@ -270,7 +542,12 @@ function Home({ apiStatus, apiResponse, apiError, connected, message, onStart })
 function VirtualOffice({
   position,
   remoteUsers,
+  participants,
+  username,
+  connectionStatus,
+  connectionError,
   onPositionChange,
+  onRetryConnection,
   isMuted,
   onToggleMute,
   onLeave,
@@ -287,7 +564,9 @@ function VirtualOffice({
   useEffect(() => {
     function handleKeyDown(event) {
       if (
-        event.altKey || event.ctrlKey || event.metaKey ||
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
         event.target?.closest("button, input, textarea, select")
       ) return;
 
@@ -312,7 +591,8 @@ function VirtualOffice({
   function moveToPointer(event) {
     if (event.target.closest("button")) return;
 
-    const bounds = roomRef.current.getBoundingClientRect();
+    const bounds = roomRef.current?.getBoundingClientRect();
+    if (!bounds?.width || !bounds?.height) return;
 
     onPositionChange({
       x: ((event.clientX - bounds.left) / bounds.width) * 100,
@@ -332,18 +612,53 @@ function VirtualOffice({
         </div>
 
         <div className="people-pill">
-          <span className="people-avatars"><i>H</i><i>M</i><i>A</i></span>
-          <span><b>{remoteUsers.length + 1}</b> connected in this office</span>
+          <span className="people-avatars">
+            <i>{getInitials(username)}</i>
+          </span>
+          <span>
+            <b>{participants.length}</b> participant(s)
+          </span>
         </div>
       </div>
 
       <section className="office-shell" aria-label="Interactive virtual office">
         <div className="room-toolbar">
           <div className="room-name">
-            <span className="room-live" /> The Commons / Open workspace
+            <span className="room-live" /> The Commons
+            <span className="room-separator">/</span> Open workspace
           </div>
-          <div className="room-presence">
-            {remoteUsers.length + 1} participant(s)
+
+          <div
+            className={`room-presence ${connectionStatus}`}
+            role="status"
+            aria-live="polite"
+          >
+            <span className={`presence-dot ${connectionStatus}`} />
+            <span>
+              {connectionStatus === "connected"
+                ? "Live connection"
+                : connectionStatus === "connecting"
+                  ? "Connecting to office"
+                  : connectionStatus === "reconnecting"
+                    ? "Reconnecting"
+                    : connectionStatus === "offline"
+                      ? "Device offline"
+                      : "Disconnected"}
+            </span>
+
+            {connectionError && connectionStatus !== "connected" && (
+              <span className="connection-detail"> · {connectionError}</span>
+            )}
+
+            {["disconnected", "offline"].includes(connectionStatus) && (
+              <button
+                className="retry-connection"
+                onClick={onRetryConnection}
+                type="button"
+              >
+                Retry
+              </button>
+            )}
           </div>
         </div>
 
@@ -354,7 +669,9 @@ function VirtualOffice({
           role="application"
           aria-label="Office floor. Click a spot to move your avatar."
         >
-          <div className="window-wall"><span /><span /><span /><span /><span /></div>
+          <div className="window-wall">
+            <span /><span /><span /><span /><span />
+          </div>
           <div className="plant plant-one"><i /><b /><em /></div>
           <div className="plant plant-two"><i /><b /><em /></div>
 
@@ -376,40 +693,35 @@ function VirtualOffice({
           <div className="sofa"><span /><span /><i /></div>
           <div className="rug" />
 
-          {remoteUsers.map((user) => {
-            const userPosition = isValidPosition(user)
-              ? clampPosition(user)
-              : INITIAL_POSITION;
-
-            return (
-              <div
-                key={user.id}
-                className="my-avatar-wrap"
-                style={{
-                  left: `${userPosition.x}%`,
-                  top: `${userPosition.y}%`,
-                  pointerEvents: "none",
-                }}
-                title={user.username || "Guest"}
+          {remoteUsers.map((user) => (
+            <div
+              key={user.id}
+              className="my-avatar-wrap"
+              style={{
+                left: `${user.x}%`,
+                top: `${user.y}%`,
+                pointerEvents: "none",
+              }}
+              title={user.username}
+            >
+              <span className="avatar-name-tag">{user.username}</span>
+              <span className="avatar-shadow" />
+              <span
+                className="my-avatar"
+                style={user.color ? { backgroundColor: user.color } : undefined}
               >
-                <span className="avatar-name-tag">
-                  {user.username || "Guest"}
-                </span>
-                <span className="avatar-shadow" />
-                <span className="my-avatar">
-                  <span className="avatar-hair" />
-                  <span className="avatar-face"><i /><i /></span>
-                  <span className="avatar-body" />
-                </span>
-              </div>
-            );
-          })}
+                <span className="avatar-hair" />
+                <span className="avatar-face"><i /><i /></span>
+                <span className="avatar-body" />
+              </span>
+            </div>
+          ))}
 
           <div
             className="my-avatar-wrap"
             style={{ left: `${position.x}%`, top: `${position.y}%` }}
           >
-            <span className="avatar-name-tag">You</span>
+            <span className="avatar-name-tag">{username}</span>
             <span className="avatar-shadow" />
             <span className="my-avatar">
               <span className="avatar-hair" />
@@ -440,17 +752,56 @@ function VirtualOffice({
             >
               {isMuted ? "Unmute" : "Mute"}
             </button>
-            <button className="control-button leave-button" onClick={onLeave}>
+            <button
+              className="control-button leave-button"
+              onClick={onLeave}
+            >
               Leave office
             </button>
           </div>
         </div>
       </section>
 
+      <ParticipantsPanel participants={participants} />
+
       <p className="office-footnote">
-        {remoteUsers.length} other participant(s) received from the backend.
+        ✦ You appear in the office as {username}.
       </p>
     </main>
+  );
+}
+
+function ParticipantsPanel({ participants }) {
+  return (
+    <section className="participants-panel" aria-label="Office participants">
+      <div className="participants-heading">
+        <h2>People in the office</h2>
+        <span>{participants.length} participant(s)</span>
+      </div>
+
+      {participants.length ? (
+        <ul className="participants-list">
+          {participants.map((participant) => (
+            <li className="participant-row" key={participant.id}>
+              <span className="participant-avatar">
+                {getInitials(participant.username)}
+              </span>
+              <span className="participant-name">
+                {participant.username}
+                {participant.isYou && <small>You</small>}
+              </span>
+              <span className={`participant-status ${participant.isYou ? "online" : "online"}`}>
+                <i /> Online
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="participants-empty">
+          Waiting for the office connection…
+        </p>
+      )}
+    </section>
   );
 }
 

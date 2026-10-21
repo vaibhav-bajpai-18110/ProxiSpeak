@@ -1,16 +1,52 @@
-# React + Vite
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+# ProxiSpeak Client
 
-Currently, two official plugins are available:
+ProxiSpeak is a browser-based virtual office that helps team members connect and collaborate.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Features
 
-## React Compiler
+- Username-based office entry
+- Backend health status
+- Real-time Socket.IO connection
+- Participant presence
+- Office avatar movement controls
+- Connection and leave controls
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Tech Stack
 
-## Expanding the Oxlint configuration
+- React
+- Vite
+- Socket.IO Client
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+## Run Locally
+
+From the repository root, open two terminals.
+
+### Terminal 1 — Backend
+
+```bash
+cd server
+npm install
+npm start
+```
+
+### Terminal 2 — Frontend
+
+```bash
+cd client
+npm install
+npm run dev
+```
+
+Open the local URL printed by Vite.
+
+The backend should be available at `http://localhost:5000` unless configured otherwise.
+
+## Configuration
+
+The frontend supports these environment variables:
+
+- `VITE_API_URL` — backend health-check URL
+- `VITE_SOCKET_URL` — Socket.IO server URL
+
+Use a local `.env` file for your own configuration. Do not commit secrets.
