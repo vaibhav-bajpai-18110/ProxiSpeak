@@ -1,4 +1,3 @@
-
 const express = require("express");
 const http = require("http");
 const path = require("path");
@@ -10,10 +9,7 @@ require("dotenv").config();
 
 const connectDB = require("./config/db");
 const { registerSocketHandlers } = require("./sockets/socketHandlers");
-
-const User = require("./models/User");
-const World = require("./models/World");
-const WorldMember = require("./models/WorldMember");
+const databaseService = require("./services/databaseService");
 
 const app = express();
 const server = http.createServer(app);
@@ -21,6 +17,7 @@ const server = http.createServer(app);
 app.use(cors());
 app.use(express.json());
 
+// Socket.IO configuration
 const io = new Server(server, {
   cors: {
     origin: "*",
@@ -39,9 +36,11 @@ app.get("/demo", (req, res) => {
 });
 
 // Serve frontend assets
-app.use(express.static(path.join(__dirname, "../public"), {
-  index: false,
-}));
+app.use(
+  express.static(path.join(__dirname, "../public"), {
+    index: false,
+  })
+);
 
 // Health check
 app.get("/api/health", (req, res) => {
@@ -63,8 +62,6 @@ app.get("/api/status", (req, res) => {
 
 // Create a world and register its owner as a member
 app.post("/api/worlds", async (req, res) => {
-  let world;
-
   try {
     const { name, ownerId, layout } = req.body;
 
@@ -79,25 +76,10 @@ app.post("/api/worlds", async (req, res) => {
       });
     }
 
-    // Ensure the specified owner exists.
-    const owner = await User.findOne({ userId: ownerId.trim() });
-
-    if (!owner) {
-      return res.status(404).json({
-        error: "Owner not found. Use an existing userId.",
-      });
-    }
-
-    world = await World.create({
-      name: name.trim(),
-      ownerId: ownerId.trim(),
-      layout: layout ?? {},
-    });
-
-    await WorldMember.create({
-      userId: ownerId.trim(),
-      worldId: world._id,
-      role: "owner",
+    const world = await databaseService.createWorld({
+      name,
+      ownerId,
+      layout,
     });
 
     return res.status(201).json({
@@ -105,15 +87,10 @@ app.post("/api/worlds", async (req, res) => {
       world,
     });
   } catch (error) {
-    // Remove the new world if creating its owner membership failed.
-    if (world) {
-      await World.deleteOne({ _id: world._id }).catch(() => {});
-    }
-
     console.error("World creation failed:", error.message);
 
-    return res.status(500).json({
-      error: "Failed to create world.",
+    return res.status(error.statusCode || 500).json({
+      error: error.statusCode ? error.message : "Failed to create world.",
     });
   }
 });
@@ -121,7 +98,7 @@ app.post("/api/worlds", async (req, res) => {
 // List worlds
 app.get("/api/worlds", async (req, res) => {
   try {
-    const worlds = await World.find().sort({ createdAt: -1 });
+    const worlds = await databaseService.listWorlds();
 
     return res.json({
       count: worlds.length,
@@ -147,22 +124,15 @@ app.get("/api/worlds/:id", async (req, res) => {
       });
     }
 
-    const world = await World.findById(id);
+    const result = await databaseService.getWorldWithMembers(id);
 
-    if (!world) {
+    if (!result) {
       return res.status(404).json({
         error: "World not found.",
       });
     }
 
-    const members = await WorldMember.find({
-      worldId: world._id,
-    });
-
-    return res.json({
-      world,
-      members,
-    });
+    return res.json(result);
   } catch (error) {
     console.error("Failed to fetch world:", error.message);
 
@@ -172,7 +142,7 @@ app.get("/api/worlds/:id", async (req, res) => {
   }
 });
 
- // Join an existing world
+// Join an existing world
 app.post("/api/worlds/:id/join", async (req, res) => {
   try {
     const { id } = req.params;
@@ -190,39 +160,7 @@ app.post("/api/worlds/:id/join", async (req, res) => {
       });
     }
 
-    const world = await World.findById(id);
-
-    if (!world) {
-      return res.status(404).json({
-        error: "World not found.",
-      });
-    }
-
-    const user = await User.findOne({
-      userId: userId.trim(),
-    });
-
-    if (!user) {
-      return res.status(404).json({
-        error: "User not found.",
-      });
-    }
-
-    const membership = await WorldMember.findOneAndUpdate(
-      {
-        userId: user.userId,
-        worldId: world._id,
-      },
-      {
-        $setOnInsert: {
-          role: "member",
-        },
-      },
-      {
-        upsert: true,
-        returnDocument: "after",
-      }
-    );
+    const membership = await databaseService.joinWorld(id, userId);
 
     return res.status(200).json({
       message: "Successfully joined the world.",
@@ -231,12 +169,11 @@ app.post("/api/worlds/:id/join", async (req, res) => {
   } catch (error) {
     console.error("Failed to join world:", error.message);
 
-    return res.status(500).json({
-      error: "Failed to join world.",
+    return res.status(error.statusCode || 500).json({
+      error: error.statusCode ? error.message : "Failed to join world.",
     });
   }
 });
-
 
 // Existing real-time Socket.IO functionality
 io.on("connection", (socket) => {
