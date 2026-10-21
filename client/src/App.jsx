@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { io } from "socket.io-client";
 import "./App.css";
 
-const API_URL = "http://localhost:5000/api/health";
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api/health";
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || new URL(API_URL).origin;
 const USERNAME_STORAGE_KEY = "proxispeak.username";
 const ROOM_BOUNDS = { minX: 8, maxX: 92, minY: 12, maxY: 88 };
@@ -50,6 +50,7 @@ function App() {
   const [isMuted, setIsMuted] = useState(false);
   const [socketStatus, setSocketStatus] = useState("idle");
   const [socketError, setSocketError] = useState("");
+  const [participants, setParticipants] = useState([]);
   const socketRef = useRef(null);
   const hasConnectedRef = useRef(false);
 
@@ -86,11 +87,13 @@ function App() {
     if (!started) {
       setSocketStatus("idle");
       setSocketError("");
+      setParticipants([]);
       return undefined;
     }
 
     const socket = io(SOCKET_URL, {
       autoConnect: false,
+      auth: { username },
       reconnection: true,
       reconnectionDelay: 800,
       reconnectionDelayMax: 5000,
@@ -105,27 +108,48 @@ function App() {
       hasConnectedRef.current = true;
       setSocketStatus("connected");
       setSocketError("");
+      setLocalParticipant("online");
+    };
+    const handleParticipantsUpdate = (nextParticipants) => {
+      if (!Array.isArray(nextParticipants)) return;
+      setParticipants(nextParticipants
+        .filter((participant) => participant && typeof participant.id === "string" && typeof participant.name === "string")
+        .map((participant) => ({
+          id: participant.id,
+          name: participant.name,
+          status: participant.status === "online" ? "online" : "offline",
+          isYou: participant.id === socket.id,
+        })));
     };
     const handleDisconnect = (reason) => {
-      setSocketStatus(!window.navigator.onLine ? "offline" : socket.active ? (hasConnectedRef.current ? "reconnecting" : "connecting") : "disconnected");
+      const status = !window.navigator.onLine ? "offline" : socket.active ? (hasConnectedRef.current ? "reconnecting" : "connecting") : "disconnected";
+      setSocketStatus(status);
       setSocketError(reason);
+      setLocalParticipant(status === "offline" || status === "disconnected" ? status : "connecting");
     };
     const handleConnectError = (error) => {
-      setSocketStatus(!window.navigator.onLine ? "offline" : hasConnectedRef.current ? "reconnecting" : "connecting");
+      const status = !window.navigator.onLine ? "offline" : hasConnectedRef.current ? "reconnecting" : "connecting";
+      setSocketStatus(status);
       setSocketError(error.message);
+      setLocalParticipant(status === "offline" ? status : "connecting");
     };
     const handleReconnectAttempt = () => {
-      setSocketStatus(!window.navigator.onLine ? "offline" : hasConnectedRef.current ? "reconnecting" : "connecting");
+      const status = !window.navigator.onLine ? "offline" : hasConnectedRef.current ? "reconnecting" : "connecting";
+      setSocketStatus(status);
+      setLocalParticipant(status === "offline" ? status : "connecting");
     };
     const handleOffline = () => {
       setSocketStatus("offline");
       setSocketError("Your device is offline.");
+      setLocalParticipant("offline");
     };
     const handleOnline = () => {
       if (socket.connected) {
         setSocketStatus("connected");
+        setLocalParticipant("online");
       } else {
         setSocketStatus("reconnecting");
+        setLocalParticipant("connecting");
         socket.connect();
       }
     };
@@ -133,22 +157,31 @@ function App() {
     socket.on("connect", handleConnect);
     socket.on("disconnect", handleDisconnect);
     socket.on("connect_error", handleConnectError);
+    socket.on("participants:update", handleParticipantsUpdate);
     socket.io.on("reconnect_attempt", handleReconnectAttempt);
     window.addEventListener("offline", handleOffline);
     window.addEventListener("online", handleOnline);
+    setLocalParticipant(window.navigator.onLine ? "connecting" : "offline");
     if (window.navigator.onLine) socket.connect();
 
     return () => {
       socket.off("connect", handleConnect);
       socket.off("disconnect", handleDisconnect);
       socket.off("connect_error", handleConnectError);
+      socket.off("participants:update", handleParticipantsUpdate);
       socket.io.off("reconnect_attempt", handleReconnectAttempt);
       window.removeEventListener("offline", handleOffline);
       window.removeEventListener("online", handleOnline);
       socket.disconnect();
       if (socketRef.current === socket) socketRef.current = null;
     };
-  }, [started]);
+  }, [started, username]);
+
+  function setLocalParticipant(status) {
+    setParticipants([
+      { id: socketRef.current?.id || "you", name: username, status, isYou: true },
+    ]);
+  }
 
   const updatePosition = useCallback((nextPosition) => {
     if (!isValidPosition(nextPosition)) return;
@@ -165,6 +198,7 @@ function App() {
     } catch {
       // The current session can still use the name when storage is unavailable.
     }
+    setSocketStatus("connecting");
     setStarted(true);
   }
 
@@ -172,9 +206,9 @@ function App() {
   const connectionLabel = {
     idle: "Not connected",
     loading: "Checking backend...",
-    connecting: "Connecting...",
+    connecting: "Connecting",
     connected: "Connected",
-    reconnecting: "Reconnecting...",
+    reconnecting: "Reconnecting",
     disconnected: "Disconnected",
     offline: "Offline",
   }[connectionStatus] || "Checking connection...";
@@ -212,6 +246,7 @@ function App() {
           username={username}
           connectionStatus={socketStatus}
           connectionError={socketError}
+          participants={participants}
           onRetryConnection={() => socketRef.current?.connect()}
           isMuted={isMuted}
           onToggleMute={() => setIsMuted((muted) => !muted)}
@@ -284,7 +319,7 @@ function Home({ apiStatus, apiResponse, apiError, username, onUsernameChange, on
 
 // Controlled position props are the integration boundary for future presence updates.
 // A backend adapter can pass normalized coordinates here once its contract is defined.
-export function VirtualOffice({ position, onPositionChange, username, connectionStatus, connectionError, onRetryConnection, isMuted, onToggleMute, onLeave }) {
+export function VirtualOffice({ position, onPositionChange, username, connectionStatus, connectionError, participants, onRetryConnection, isMuted, onToggleMute, onLeave }) {
   const roomRef = useRef(null);
   const moveBy = useCallback((dx, dy) => {
     onPositionChange({ x: position.x + dx, y: position.y + dy });
@@ -325,7 +360,7 @@ export function VirtualOffice({ position, onPositionChange, username, connection
           <h1>Welcome to the office<span>.</span></h1>
           <p className="office-subtitle">Move around and find a spot to settle in.</p>
         </div>
-        <div className="people-pill"><span className="people-avatars"><i>{getInitials(username)}</i><i>M</i><i>A</i></span><span><b>4</b> in the office</span></div>
+        <div className="people-pill"><span className="people-avatars"><i>{getInitials(username)}</i></span><span><b>{participants.filter((participant) => participant.status === "online").length}</b> online</span></div>
       </div>
 
       <section className="office-shell" aria-label="Interactive virtual office">
@@ -353,10 +388,6 @@ export function VirtualOffice({ position, onPositionChange, username, connection
           <div className="sofa"><span /><span /><i /></div>
           <div className="rug" />
 
-          <OfficeMate className="mate-one" initials="M" name="Maya" mood="Focused" />
-          <OfficeMate className="mate-two" initials="A" name="Alex" mood="Available" />
-          <OfficeMate className="mate-three" initials="J" name="Jordan" mood="In a call" />
-
           <div
             className="my-avatar-wrap"
             style={{ left: `${position.x}%`, top: `${position.y}%` }}
@@ -378,18 +409,35 @@ export function VirtualOffice({ position, onPositionChange, username, connection
           </div>
         </div>
       </section>
+      <ParticipantsPanel participants={participants} />
       <p className="office-footnote"><span>✦</span> You appear in the office as {username}.</p>
     </main>
   );
 }
 
-function OfficeMate({ className, initials, name, mood }) {
+function ParticipantsPanel({ participants }) {
   return (
-    <div className={`office-mate ${className}`} title={`${name} · ${mood}`}>
-      <span className={`mate-avatar mate-${initials.toLowerCase()}`}>{initials}</span>
-      <span className="mate-status">{mood}</span>
-      <span className="mate-name">{name}</span>
-    </div>
+    <section className="participants-panel" aria-label="Office participants">
+      <div className="participants-heading">
+        <h2>People in the office</h2>
+        <span>{participants.length} participant{participants.length === 1 ? "" : "s"}</span>
+      </div>
+      {participants.length ? (
+        <ul className="participants-list">
+          {participants.map((participant) => (
+            <li className="participant-row" key={participant.id}>
+              <span className="participant-avatar">{getInitials(participant.name)}</span>
+              <span className="participant-name">{participant.name}{participant.isYou && <small>You</small>}</span>
+              <span className={`participant-status ${participant.status}`}>
+                <i />{participant.status === "online" ? "Online" : participant.status === "connecting" ? "Connecting" : "Offline"}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="participants-empty">Waiting for the office connection…</p>
+      )}
+    </section>
   );
 }
 
