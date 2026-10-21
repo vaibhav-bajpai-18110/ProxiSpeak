@@ -1,9 +1,29 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { io } from "socket.io-client";
 import "./App.css";
 
 const API_URL = "http://localhost:5000/api/health";
+const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || new URL(API_URL).origin;
+const USERNAME_STORAGE_KEY = "proxispeak.username";
 const ROOM_BOUNDS = { minX: 8, maxX: 92, minY: 12, maxY: 88 };
 const INITIAL_POSITION = { x: 49, y: 57 };
+
+function getSavedUsername() {
+  try {
+    return window.localStorage.getItem(USERNAME_STORAGE_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function getInitials(name) {
+  return name
+    .trim()
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join("");
+}
 
 function clampPosition(position) {
   return {
@@ -25,8 +45,13 @@ function App() {
   const [apiStatus, setApiStatus] = useState("loading");
   const [apiResponse, setApiResponse] = useState(null);
   const [apiError, setApiError] = useState("");
+  const [username, setUsername] = useState(getSavedUsername);
   const [position, setPosition] = useState(INITIAL_POSITION);
   const [isMuted, setIsMuted] = useState(false);
+  const [socketStatus, setSocketStatus] = useState("idle");
+  const [socketError, setSocketError] = useState("");
+  const socketRef = useRef(null);
+  const hasConnectedRef = useRef(false);
 
   const checkBackend = useCallback(async (signal) => {
     setApiStatus("loading");
@@ -57,10 +82,102 @@ function App() {
     return () => controller.abort();
   }, [checkBackend]);
 
+  useEffect(() => {
+    if (!started) {
+      setSocketStatus("idle");
+      setSocketError("");
+      return undefined;
+    }
+
+    const socket = io(SOCKET_URL, {
+      autoConnect: false,
+      reconnection: true,
+      reconnectionDelay: 800,
+      reconnectionDelayMax: 5000,
+      timeout: 10000,
+    });
+    socketRef.current = socket;
+    hasConnectedRef.current = false;
+    setSocketStatus(window.navigator.onLine ? "connecting" : "offline");
+    setSocketError("");
+
+    const handleConnect = () => {
+      hasConnectedRef.current = true;
+      setSocketStatus("connected");
+      setSocketError("");
+    };
+    const handleDisconnect = (reason) => {
+      setSocketStatus(!window.navigator.onLine ? "offline" : socket.active ? (hasConnectedRef.current ? "reconnecting" : "connecting") : "disconnected");
+      setSocketError(reason);
+    };
+    const handleConnectError = (error) => {
+      setSocketStatus(!window.navigator.onLine ? "offline" : hasConnectedRef.current ? "reconnecting" : "connecting");
+      setSocketError(error.message);
+    };
+    const handleReconnectAttempt = () => {
+      setSocketStatus(!window.navigator.onLine ? "offline" : hasConnectedRef.current ? "reconnecting" : "connecting");
+    };
+    const handleOffline = () => {
+      setSocketStatus("offline");
+      setSocketError("Your device is offline.");
+    };
+    const handleOnline = () => {
+      if (socket.connected) {
+        setSocketStatus("connected");
+      } else {
+        setSocketStatus("reconnecting");
+        socket.connect();
+      }
+    };
+
+    socket.on("connect", handleConnect);
+    socket.on("disconnect", handleDisconnect);
+    socket.on("connect_error", handleConnectError);
+    socket.io.on("reconnect_attempt", handleReconnectAttempt);
+    window.addEventListener("offline", handleOffline);
+    window.addEventListener("online", handleOnline);
+    if (window.navigator.onLine) socket.connect();
+
+    return () => {
+      socket.off("connect", handleConnect);
+      socket.off("disconnect", handleDisconnect);
+      socket.off("connect_error", handleConnectError);
+      socket.io.off("reconnect_attempt", handleReconnectAttempt);
+      window.removeEventListener("offline", handleOffline);
+      window.removeEventListener("online", handleOnline);
+      socket.disconnect();
+      if (socketRef.current === socket) socketRef.current = null;
+    };
+  }, [started]);
+
   const updatePosition = useCallback((nextPosition) => {
     if (!isValidPosition(nextPosition)) return;
     setPosition(clampPosition(nextPosition));
   }, []);
+
+  function enterOffice(event) {
+    event.preventDefault();
+    const cleanUsername = username.trim().replace(/\s+/g, " ");
+    if (!cleanUsername) return;
+    setUsername(cleanUsername);
+    try {
+      window.localStorage.setItem(USERNAME_STORAGE_KEY, cleanUsername);
+    } catch {
+      // The current session can still use the name when storage is unavailable.
+    }
+    setStarted(true);
+  }
+
+  const connectionStatus = started ? socketStatus : apiStatus;
+  const connectionLabel = {
+    idle: "Not connected",
+    loading: "Checking backend...",
+    connecting: "Connecting...",
+    connected: "Connected",
+    reconnecting: "Reconnecting...",
+    disconnected: "Disconnected",
+    offline: "Offline",
+  }[connectionStatus] || "Checking connection...";
 
   return (
     <div className="app">
@@ -78,12 +195,12 @@ function App() {
           {started && (
             <span className="room-label"><span className="room-label-dot" /> PRODUCTIVITY FLOOR</span>
           )}
-          <span className={`nav-status ${apiStatus}`}>
-            <span className={`status-dot ${apiStatus}`} />
-            {apiStatus === "loading" ? "Checking backend..." : apiStatus === "connected" ? "Connected" : "Disconnected"}
+          <span className={`nav-status ${connectionStatus}`} role="status" aria-live="polite">
+            <span className={`status-dot ${connectionStatus}`} />
+            {connectionLabel}
           </span>
           {started && (
-            <button className="avatar-small" title="Harshavardhan" aria-label="Harshavardhan profile">H</button>
+            <span className="avatar-small" title={username} aria-label={`${username} profile`}>{getInitials(username)}</span>
           )}
         </div>
       </header>
@@ -92,7 +209,10 @@ function App() {
         <VirtualOffice
           position={position}
           onPositionChange={updatePosition}
-          apiStatus={apiStatus}
+          username={username}
+          connectionStatus={socketStatus}
+          connectionError={socketError}
+          onRetryConnection={() => socketRef.current?.connect()}
           isMuted={isMuted}
           onToggleMute={() => setIsMuted((muted) => !muted)}
           onLeave={() => setStarted(false)}
@@ -102,7 +222,9 @@ function App() {
           apiStatus={apiStatus}
           apiResponse={apiResponse}
           apiError={apiError}
-          onStart={() => setStarted(true)}
+          username={username}
+          onUsernameChange={setUsername}
+          onJoin={enterOffice}
         />
       )}
 
@@ -113,7 +235,7 @@ function App() {
   );
 }
 
-function Home({ apiStatus, apiResponse, apiError, onStart }) {
+function Home({ apiStatus, apiResponse, apiError, username, onUsernameChange, onJoin }) {
   return (
     <main className="hero">
       <div className="hero-icon"><span aria-hidden="true">◉</span></div>
@@ -135,9 +257,26 @@ function Home({ apiStatus, apiResponse, apiError, onStart }) {
         {apiStatus === "disconnected" && <p className="api-error" role="alert">Backend unavailable: {apiError}</p>}
       </div>
 
-      <button className="start-button" onClick={onStart}>
-        Enter virtual office <span aria-hidden="true">→</span>
-      </button>
+      <form className="join-form" onSubmit={onJoin}>
+        <label className="username-field">
+          <span>Your display name</span>
+          <input
+            autoComplete="nickname"
+            maxLength={24}
+            name="username"
+            onChange={(event) => onUsernameChange(event.target.value)}
+            pattern=".*\S.*"
+            placeholder="e.g. Harshavardhan"
+            required
+            title="Enter at least one non-space character."
+            value={username}
+          />
+        </label>
+        <p className="username-hint">This name appears above your avatar.</p>
+        <button className="start-button" type="submit">
+          Enter virtual office <span aria-hidden="true">→</span>
+        </button>
+      </form>
       <p className="footer-note">A little space to work together, wherever you are.</p>
     </main>
   );
@@ -145,7 +284,7 @@ function Home({ apiStatus, apiResponse, apiError, onStart }) {
 
 // Controlled position props are the integration boundary for future presence updates.
 // A backend adapter can pass normalized coordinates here once its contract is defined.
-export function VirtualOffice({ position, onPositionChange, apiStatus, isMuted, onToggleMute, onLeave }) {
+export function VirtualOffice({ position, onPositionChange, username, connectionStatus, connectionError, onRetryConnection, isMuted, onToggleMute, onLeave }) {
   const roomRef = useRef(null);
   const moveBy = useCallback((dx, dy) => {
     onPositionChange({ x: position.x + dx, y: position.y + dy });
@@ -186,13 +325,18 @@ export function VirtualOffice({ position, onPositionChange, apiStatus, isMuted, 
           <h1>Welcome to the office<span>.</span></h1>
           <p className="office-subtitle">Move around and find a spot to settle in.</p>
         </div>
-        <div className="people-pill"><span className="people-avatars"><i>H</i><i>M</i><i>A</i></span><span><b>4</b> in the office</span></div>
+        <div className="people-pill"><span className="people-avatars"><i>{getInitials(username)}</i><i>M</i><i>A</i></span><span><b>4</b> in the office</span></div>
       </div>
 
       <section className="office-shell" aria-label="Interactive virtual office">
         <div className="room-toolbar">
           <div className="room-name"><span className="room-live" /> The Commons <span className="room-separator">/</span> Open workspace</div>
-          <div className="room-presence"><span className={`presence-dot ${apiStatus}`} /> {apiStatus === "connected" ? "Backend online" : "Local preview"}</div>
+          <div className={`room-presence ${connectionStatus}`} role="status" aria-live="polite">
+            <span className={`presence-dot ${connectionStatus}`} />
+            <span>{connectionStatus === "connected" ? "Live connection" : connectionStatus === "connecting" ? "Connecting to office" : connectionStatus === "reconnecting" ? "Reconnecting" : connectionStatus === "offline" ? "Device offline" : "Disconnected"}</span>
+            {connectionError && connectionStatus !== "connected" && <span className="connection-detail"> · {connectionError}</span>}
+            {connectionStatus === "disconnected" && <button className="retry-connection" onClick={onRetryConnection} type="button">Retry</button>}
+          </div>
         </div>
 
         <div className="room-scene" ref={roomRef} onClick={moveToPointer} role="application" aria-label="Office floor. Click a spot to move your avatar there.">
@@ -218,7 +362,7 @@ export function VirtualOffice({ position, onPositionChange, apiStatus, isMuted, 
             style={{ left: `${position.x}%`, top: `${position.y}%` }}
             aria-label={`Your avatar, position ${Math.round(position.x)}, ${Math.round(position.y)}`}
           >
-            <span className="avatar-name-tag">You</span>
+            <span className="avatar-name-tag">{username}</span>
             <span className="avatar-shadow" />
             <span className="my-avatar"><span className="avatar-hair" /><span className="avatar-face"><i /><i /></span><span className="avatar-body" /></span>
             <span className="avatar-position">{Math.round(position.x)}, {Math.round(position.y)}</span>
@@ -234,7 +378,7 @@ export function VirtualOffice({ position, onPositionChange, apiStatus, isMuted, 
           </div>
         </div>
       </section>
-      <p className="office-footnote"><span>✦</span> Your position is ready to sync when live presence is connected.</p>
+      <p className="office-footnote"><span>✦</span> You appear in the office as {username}.</p>
     </main>
   );
 }
