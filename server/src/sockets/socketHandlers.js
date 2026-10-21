@@ -1,13 +1,18 @@
 
-/**
- * ProxiSpeak Socket.IO handlers.
- * Supports live users, avatar movement, and persistent communication sessions.
- */
 const User = require("../models/User");
 const CommunicationSession = require("../models/CommunicationSession");
 
 const users = new Map();
 const activeSessions = new Map();
+
+const MAP_BOUNDS = {
+  MIN_X: 0,
+  MAX_X: 2000,
+  MIN_Y: 0,
+  MAX_Y: 2000,
+};
+
+const DEFAULT_ROOM = "main-office";
 
 const AVATAR_COLORS = [
   "#3B82F6",
@@ -26,227 +31,267 @@ function getRandomColor() {
   ];
 }
 
+function isFiniteNumber(value) {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, Math.round(value)));
+}
+
+function sanitizeUsername(input, defaultName) {
+  if (typeof input !== "string") return defaultName;
+
+  const trimmed = input.trim();
+  return trimmed ? trimmed.slice(0, 30) : defaultName;
+}
+
+function sanitizeRoomId(roomId) {
+  if (typeof roomId !== "string") return DEFAULT_ROOM;
+
+  const clean = roomId.trim().toLowerCase().replace(/[^a-z0-9-_]/g, "");
+  return clean ? clean.slice(0, 50) : DEFAULT_ROOM;
+}
+
+function getRoomParticipants(roomId) {
+  return Array.from(users.values()).filter(
+    (user) => user.roomId === roomId
+  );
+}
+
+async function saveUser(user) {
+  try {
+    await User.findOneAndUpdate(
+      { userId: user.id },
+      { $set: { username: user.username } },
+      {
+        upsert: true,
+        returnDocument: "after",
+        runValidators: true,
+      }
+    );
+  } catch (error) {
+    console.error("Failed to save user:", error.message);
+  }
+}
+
 function registerSocketHandlers(io, socket) {
-  console.log("User connected:", socket.id);
+  console.log(`[SOCKET CONNECT] User connected: ${socket.id}`);
+
+  socket.on("error", (error) => {
+    console.error(
+      `[SOCKET ERROR] ${socket.id}:`,
+      error?.message || error
+    );
+  });
 
   const user = {
     id: socket.id,
     username: `Guest-${socket.id.slice(0, 4)}`,
-    x: 49,
-    y: 57,
+    roomId: DEFAULT_ROOM,
+    x: 300,
+    y: 250,
     color: getRandomColor(),
   };
 
   users.set(socket.id, user);
+  socket.join(DEFAULT_ROOM);
 
-  // Save the connected user in MongoDB.
-  User.findOneAndUpdate(
-    { userId: socket.id },
-    { $set: { username: user.username } },
-    {
-      upsert: true,
-      returnDocument: "after",
-      runValidators: true,
-    }
-  ).catch((error) => {
-    console.error("Failed to save connected user:", error.message);
-  });
+  void saveUser(user);
 
-  // Send existing users to the newly connected client.
   socket.emit(
     "currentUsers",
     Array.from(users.values()).filter(
-      (item) => item.id !== socket.id
+      (existingUser) => existingUser.id !== socket.id
     )
   );
 
-  // Notify other connected clients.
-  socket.broadcast.emit("userJoined", user);
+  socket.emit("roomParticipants", {
+    roomId: DEFAULT_ROOM,
+    participants: getRoomParticipants(DEFAULT_ROOM),
+  });
 
-  // Update username when a user joins.
-  socket.on("join", async (data = {}) => {
+  socket.broadcast.emit("userJoined", user);
+  socket.to(DEFAULT_ROOM).emit("participantJoined", user);
+
+  function sendValidationError(message, received) {
+    const payload = { message };
+    if (received !== undefined) payload.received = received;
+    socket.emit("error:validation", payload);
+  }
+
+  function joinRoom(data = {}) {
     const currentUser = users.get(socket.id);
     if (!currentUser) return;
 
-    if (typeof data.username === "string" && data.username.trim()) {
-      currentUser.username = data.username.trim();
+    const targetRoom = sanitizeRoomId(data.roomId || DEFAULT_ROOM);
+    const oldRoom = currentUser.roomId;
+
+    if (data.username) {
+      currentUser.username = sanitizeUsername(
+        data.username,
+        currentUser.username
+      );
     }
 
-    if (typeof data.x === "number" && Number.isFinite(data.x)) {
-      currentUser.x = Math.min(92, Math.max(8, data.x));
-    }
+    if (oldRoom !== targetRoom) {
+      socket.leave(oldRoom);
 
-    if (typeof data.y === "number" && Number.isFinite(data.y)) {
-      currentUser.y = Math.min(88, Math.max(12, data.y));
-    }
+      socket.to(oldRoom).emit("participantLeft", {
+        id: socket.id,
+        username: currentUser.username,
+        roomId: oldRoom,
+      });
 
-    if (typeof data.color === "string" && data.color.trim()) {
-      currentUser.color = data.color;
+      socket.join(targetRoom);
+      currentUser.roomId = targetRoom;
     }
 
     users.set(socket.id, currentUser);
+    void saveUser(currentUser);
 
-    try {
-      await User.findOneAndUpdate(
-        { userId: socket.id },
-        { $set: { username: currentUser.username } },
-        {
-          upsert: true,
-          returnDocument: "after",
-          runValidators: true,
-        }
-      );
-    } catch (error) {
-      console.error("Failed to update user:", error.message);
+    socket.emit("roomParticipants", {
+      roomId: targetRoom,
+      participants: getRoomParticipants(targetRoom),
+    });
+
+    if (oldRoom !== targetRoom) {
+      socket.to(targetRoom).emit("participantJoined", currentUser);
     }
 
     socket.broadcast.emit("userJoined", currentUser);
-  });
+  }
 
-  // Start a persistent communication session with another user.
-  socket.on("startCommunicationSession", async (data = {}, callback) => {
+  socket.on("joinRoom", (data = {}) => {
     try {
-      const participantId = data.participantId;
-
-      if (
-        typeof participantId !== "string" ||
-        participantId === socket.id ||
-        !users.has(participantId)
-      ) {
-        const result = {
-          error: "A different connected participantId is required.",
-        };
-
-        if (typeof callback === "function") callback(result);
-        else socket.emit("communicationSessionError", result);
-        return;
-      }
-
-      const participantIds = [socket.id, participantId].sort();
-
-      const existingSession = await CommunicationSession.findOne({
-        participantIds: { $all: participantIds, $size: 2 },
-        status: "active",
-      });
-
-      if (existingSession) {
-        const result = {
-          sessionId: existingSession._id.toString(),
-          status: existingSession.status,
-        };
-
-        if (typeof callback === "function") callback(result);
-        else socket.emit("communicationSessionStarted", result);
-        return;
-      }
-
-      const session = await CommunicationSession.create({
-        participantIds,
-        status: "active",
-        startedAt: new Date(),
-      });
-
-      activeSessions.set(session._id.toString(), participantIds);
-
-      const result = {
-        sessionId: session._id.toString(),
-        participantIds,
-        status: session.status,
-        startedAt: session.startedAt,
-      };
-
-      if (typeof callback === "function") callback(result);
-      else socket.emit("communicationSessionStarted", result);
-
-      io.to(participantId).emit("communicationSessionStarted", result);
+      joinRoom(data);
     } catch (error) {
-      console.error(
-        "Failed to start communication session:",
-        error.message
-      );
-
-      const result = { error: "Failed to start communication session." };
-
-      if (typeof callback === "function") callback(result);
-      else socket.emit("communicationSessionError", result);
+      console.error("Join room failed:", error.message);
+      sendValidationError("Failed to join room");
     }
   });
 
-  // End a session only if the requesting user is a participant.
-  socket.on("endCommunicationSession", async (data = {}, callback) => {
-    try {
-      const sessionId = data.sessionId;
-
-      if (typeof sessionId !== "string") {
-        const result = { error: "A sessionId is required." };
-
-        if (typeof callback === "function") callback(result);
-        else socket.emit("communicationSessionError", result);
-        return;
-      }
-
-      const session = await CommunicationSession.findOneAndUpdate(
-        {
-          _id: sessionId,
-          participantIds: socket.id,
-          status: "active",
-        },
-        { $set: { status: "ended", endedAt: new Date() } },
-        { returnDocument: "after" }
-      );
-
-      if (!session) {
-        const result = {
-          error: "Active session not found for this participant.",
-        };
-
-        if (typeof callback === "function") callback(result);
-        else socket.emit("communicationSessionError", result);
-        return;
-      }
-
-      activeSessions.delete(sessionId);
-
-      const result = {
-        sessionId,
-        status: session.status,
-        endedAt: session.endedAt,
-      };
-
-      if (typeof callback === "function") callback(result);
-      else socket.emit("communicationSessionEnded", result);
-
-      for (const participantId of session.participantIds) {
-        io.to(participantId).emit("communicationSessionEnded", result);
-      }
-    } catch (error) {
-      console.error("Failed to end communication session:", error.message);
-
-      const result = { error: "Failed to end communication session." };
-
-      if (typeof callback === "function") callback(result);
-      else socket.emit("communicationSessionError", result);
-    }
-  });
-
-  // Update avatar position and broadcast it to other clients.
-  function handlePosition(position) {
+  socket.on("join", (data = {}) => {
     const currentUser = users.get(socket.id);
-    if (!currentUser || !position) return;
+    if (!currentUser) return;
 
-    const x = Number(position.x);
-    const y = Number(position.y);
+    if (data.roomId) {
+      joinRoom(data);
+      return;
+    }
 
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    if (data.username) {
+      currentUser.username = sanitizeUsername(
+        data.username,
+        currentUser.username
+      );
+      users.set(socket.id, currentUser);
+      void saveUser(currentUser);
+      socket.broadcast.emit("userJoined", currentUser);
+    }
 
-    currentUser.x = Math.min(92, Math.max(8, x));
-    currentUser.y = Math.min(88, Math.max(12, y));
+    if (isFiniteNumber(data.x)) {
+      currentUser.x = clamp(data.x, MAP_BOUNDS.MIN_X, MAP_BOUNDS.MAX_X);
+    }
+
+    if (isFiniteNumber(data.y)) {
+      currentUser.y = clamp(data.y, MAP_BOUNDS.MIN_Y, MAP_BOUNDS.MAX_Y);
+    }
+
+    if (typeof data.color === "string" && data.color.trim()) {
+      currentUser.color = data.color.trim();
+    }
+  });
+
+  socket.on("leaveRoom", (data = {}) => {
+    try {
+      const currentUser = users.get(socket.id);
+      if (!currentUser) return;
+
+      const roomToLeave = sanitizeRoomId(
+        data.roomId || currentUser.roomId
+      );
+
+      socket.leave(roomToLeave);
+
+      socket.to(roomToLeave).emit("participantLeft", {
+        id: socket.id,
+        username: currentUser.username,
+        roomId: roomToLeave,
+      });
+
+      if (currentUser.roomId === roomToLeave) {
+        currentUser.roomId = DEFAULT_ROOM;
+        socket.join(DEFAULT_ROOM);
+        users.set(socket.id, currentUser);
+
+        socket.emit("roomParticipants", {
+          roomId: DEFAULT_ROOM,
+          participants: getRoomParticipants(DEFAULT_ROOM),
+        });
+
+        socket.to(DEFAULT_ROOM).emit("participantJoined", currentUser);
+      }
+    } catch (error) {
+      console.error("Leave room failed:", error.message);
+    }
+  });
+
+  socket.on("getParticipants", (data = {}, callback) => {
+    const roomId = sanitizeRoomId(data.roomId || DEFAULT_ROOM);
+    const result = {
+      roomId,
+      participants: getRoomParticipants(roomId),
+    };
+
+    if (typeof callback === "function") {
+      callback(result);
+    } else {
+      socket.emit("roomParticipants", result);
+    }
+  });
+
+  function handlePosition(position) {
+    if (
+      !position ||
+      typeof position !== "object" ||
+      Array.isArray(position)
+    ) {
+      sendValidationError("Position payload must be an object");
+      return;
+    }
+
+    if (!isFiniteNumber(position.x) || !isFiniteNumber(position.y)) {
+      sendValidationError("Coordinates x and y must be finite numbers", {
+        x: position.x,
+        y: position.y,
+      });
+      return;
+    }
+
+    const currentUser = users.get(socket.id);
+    if (!currentUser) {
+      sendValidationError("User not found in active session");
+      return;
+    }
+
+    currentUser.x = clamp(
+      position.x,
+      MAP_BOUNDS.MIN_X,
+      MAP_BOUNDS.MAX_X
+    );
+    currentUser.y = clamp(
+      position.y,
+      MAP_BOUNDS.MIN_Y,
+      MAP_BOUNDS.MAX_Y
+    );
 
     users.set(socket.id, currentUser);
 
     const payload = {
       id: socket.id,
       username: currentUser.username,
+      roomId: currentUser.roomId,
       x: currentUser.x,
       y: currentUser.y,
       color: currentUser.color,
@@ -259,17 +304,181 @@ function registerSocketHandlers(io, socket) {
   socket.on("updatePosition", handlePosition);
   socket.on("userMoved", handlePosition);
 
-  // Ping/pong connectivity check.
   socket.on("ping", (data) => {
     socket.emit("pong", {
-      message: data?.message || "Pong received",
+      message:
+        typeof data?.message === "string"
+          ? data.message
+          : "Pong received",
     });
   });
 
-  // Remove the user and end their active sessions on disconnect.
-  socket.on("disconnect", async () => {
-    console.log("User disconnected:", socket.id);
+  socket.on("signal:offer", (data = {}) => {
+    if (typeof data.targetId === "string" && data.offer) {
+      io.to(data.targetId).emit("signal:offer", {
+        senderId: socket.id,
+        offer: data.offer,
+      });
+    }
+  });
+
+  socket.on("signal:answer", (data = {}) => {
+    if (typeof data.targetId === "string" && data.answer) {
+      io.to(data.targetId).emit("signal:answer", {
+        senderId: socket.id,
+        answer: data.answer,
+      });
+    }
+  });
+
+  socket.on("signal:ice-candidate", (data = {}) => {
+    if (typeof data.targetId === "string" && data.candidate) {
+      io.to(data.targetId).emit("signal:ice-candidate", {
+        senderId: socket.id,
+        candidate: data.candidate,
+      });
+    }
+  });
+
+  socket.on("startCommunicationSession", async (data = {}, callback) => {
+    const respond = (result) => {
+      if (typeof callback === "function") {
+        callback(result);
+      } else if (result.error) {
+        socket.emit("communicationSessionError", result);
+      } else {
+        socket.emit("communicationSessionStarted", result);
+      }
+    };
+
+    try {
+      const participantId = data.participantId;
+
+      if (
+        typeof participantId !== "string" ||
+        participantId === socket.id ||
+        !users.has(participantId)
+      ) {
+        respond({
+          error: "A different connected participantId is required.",
+        });
+        return;
+      }
+
+      const participantIds = [socket.id, participantId].sort();
+
+      let session = await CommunicationSession.findOne({
+        participantIds: { $all: participantIds, $size: 2 },
+        status: "active",
+      });
+
+      if (!session) {
+        session = await CommunicationSession.create({
+          participantIds,
+          status: "active",
+          startedAt: new Date(),
+        });
+      }
+
+      const sessionId = session._id.toString();
+      activeSessions.set(sessionId, participantIds);
+
+      const result = {
+        sessionId,
+        participantIds,
+        status: session.status,
+        startedAt: session.startedAt,
+      };
+
+      respond(result);
+      io.to(participantId).emit("communicationSessionStarted", result);
+    } catch (error) {
+      console.error("Failed to start communication session:", error.message);
+      respond({ error: "Failed to start communication session." });
+    }
+  });
+
+  socket.on("endCommunicationSession", async (data = {}, callback) => {
+    const respond = (result) => {
+      if (typeof callback === "function") {
+        callback(result);
+      } else {
+        socket.emit(
+          result.error
+            ? "communicationSessionError"
+            : "communicationSessionEnded",
+          result
+        );
+      }
+    };
+
+    try {
+      if (typeof data.sessionId !== "string") {
+        respond({ error: "A sessionId is required." });
+        return;
+      }
+
+      const session = await CommunicationSession.findOneAndUpdate(
+        {
+          _id: data.sessionId,
+          participantIds: socket.id,
+          status: "active",
+        },
+        { $set: { status: "ended", endedAt: new Date() } },
+        { returnDocument: "after" }
+      );
+
+      if (!session) {
+        respond({
+          error: "Active session not found for this participant.",
+        });
+        return;
+      }
+
+      activeSessions.delete(data.sessionId);
+
+      const result = {
+        sessionId: data.sessionId,
+        status: session.status,
+        endedAt: session.endedAt,
+      };
+
+      respond(result);
+
+      for (const participantId of session.participantIds) {
+        io.to(participantId).emit("communicationSessionEnded", result);
+      }
+    } catch (error) {
+      console.error("Failed to end communication session:", error.message);
+      respond({ error: "Failed to end communication session." });
+    }
+  });
+
+  socket.on("disconnect", async (reason) => {
+    console.log(
+      `[SOCKET DISCONNECT] ${socket.id} (${reason || "unknown reason"})`
+    );
+
+    const disconnectedUser = users.get(socket.id);
     users.delete(socket.id);
+
+    if (disconnectedUser) {
+      socket.to(disconnectedUser.roomId).emit("participantLeft", {
+        id: socket.id,
+        username: disconnectedUser.username,
+        roomId: disconnectedUser.roomId,
+        reason,
+      });
+    }
+
+    // Keep the string ID for compatibility with the existing frontend.
+    socket.broadcast.emit("userDisconnected", socket.id);
+
+    socket.broadcast.emit("userLeft", {
+      id: socket.id,
+      username: disconnectedUser?.username || `Guest-${socket.id.slice(0, 4)}`,
+      reason,
+    });
 
     try {
       const endedAt = new Date();
@@ -313,15 +522,34 @@ function registerSocketHandlers(io, socket) {
         error.message
       );
     }
-
-    // Preserve the string ID expected by the existing frontend.
-    io.emit("userDisconnected", socket.id);
-    socket.broadcast.emit("userLeft", { id: socket.id });
   });
+}
+
+function getUserCount() {
+  return users.size;
+}
+
+function hasUser(id) {
+  return users.has(id);
+}
+
+function clearUsers() {
+  users.clear();
+  activeSessions.clear();
 }
 
 module.exports = {
   registerSocketHandlers,
   users,
   activeSessions,
+  getRoomParticipants,
+  getUserCount,
+  hasUser,
+  clearUsers,
+  isFiniteNumber,
+  clamp,
+  sanitizeUsername,
+  sanitizeRoomId,
+  DEFAULT_ROOM,
+  MAP_BOUNDS,
 };

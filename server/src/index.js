@@ -4,7 +4,6 @@ const http = require("http");
 const path = require("path");
 const cors = require("cors");
 const mongoose = require("mongoose");
-const { Server } = require("socket.io");
 
 require("dotenv").config();
 
@@ -18,8 +17,7 @@ const server = http.createServer(app);
 app.use(cors());
 app.use(express.json());
 
-// Socket.IO configuration
-const io = new Server(server, {
+const io = require("socket.io")(server, {
   cors: {
     origin: "*",
     methods: ["GET", "POST"],
@@ -36,7 +34,7 @@ app.get("/demo", (req, res) => {
   res.sendFile(path.join(__dirname, "../public/index.html"));
 });
 
-// Serve backend public assets
+// Serve public assets
 app.use(
   express.static(path.join(__dirname, "../public"), {
     index: false,
@@ -78,8 +76,8 @@ app.post("/api/worlds", async (req, res) => {
     }
 
     const world = await databaseService.createWorld({
-      name,
-      ownerId,
+      name: name.trim(),
+      ownerId: ownerId.trim(),
       layout,
     });
 
@@ -120,17 +118,13 @@ app.get("/api/worlds/:id", async (req, res) => {
     const { id } = req.params;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({
-        error: "Invalid world ID.",
-      });
+      return res.status(400).json({ error: "Invalid world ID." });
     }
 
     const result = await databaseService.getWorldWithMembers(id);
 
     if (!result) {
-      return res.status(404).json({
-        error: "World not found.",
-      });
+      return res.status(404).json({ error: "World not found." });
     }
 
     return res.json(result);
@@ -150,18 +144,14 @@ app.post("/api/worlds/:id/join", async (req, res) => {
     const { userId } = req.body;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({
-        error: "Invalid world ID.",
-      });
+      return res.status(400).json({ error: "Invalid world ID." });
     }
 
     if (typeof userId !== "string" || !userId.trim()) {
-      return res.status(400).json({
-        error: "A userId is required.",
-      });
+      return res.status(400).json({ error: "A userId is required." });
     }
 
-    const membership = await databaseService.joinWorld(id, userId);
+    const membership = await databaseService.joinWorld(id, userId.trim());
 
     return res.status(200).json({
       message: "Successfully joined the world.",
@@ -176,10 +166,36 @@ app.post("/api/worlds/:id/join", async (req, res) => {
   }
 });
 
-// Socket.IO real-time functionality
+// Register Socket.IO handlers
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
   registerSocketHandlers(io, socket);
+});
+
+// 404 handler for unknown routes
+app.use((req, res) => {
+  if (req.path.startsWith("/api/")) {
+    return res.status(404).json({
+      error: "Not Found",
+      path: req.path,
+    });
+  }
+
+  return res.status(404).send("Not Found");
+});
+
+// Global error handler
+app.use((err, req, res, next) => {
+  console.error("[SERVER ERROR]:", err);
+
+  if (res.headersSent) {
+    return next(err);
+  }
+
+  return res.status(500).json({
+    error: "Internal Server Error",
+    message: err.message,
+  });
 });
 
 // Start server after MongoDB connects
