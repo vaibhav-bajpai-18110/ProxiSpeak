@@ -5,7 +5,7 @@ const cors = require("cors");
 const { Server } = require("socket.io");
 require("dotenv").config();
 
-const { registerSocketHandlers } = require("./sockets/socketHandlers");
+const { registerSocketHandlers, getUserCount } = require("./sockets/socketHandlers");
 
 const app = express();
 
@@ -34,18 +34,24 @@ app.get("/demo", (req, res) => {
 // Serve static assets for demo (without overriding root)
 app.use(express.static(path.join(__dirname, "../public"), { index: false }));
 
+// Health Check Endpoint
 app.get("/api/health", (req, res) => {
+  res.setHeader("Cache-Control", "no-cache");
   res.json({
     status: "OK",
-    project: "ProxiSpeak"
+    project: "ProxiSpeak",
+    timestamp: new Date().toISOString()
   });
 });
 
+// Server Status Endpoint
 app.get("/api/status", (req, res) => {
+  res.setHeader("Cache-Control", "no-cache");
   res.json({
     status: "active",
     message: "ProxiSpeak server is operational",
     uptime: `${Math.floor(process.uptime())}s`,
+    activeUsers: getUserCount(),
     timestamp: new Date().toISOString()
   });
 });
@@ -64,6 +70,7 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: "Internal Server Error", message: err.message });
 });
 
+// Socket.IO Connection Handler
 io.on("connection", (socket) => {
   registerSocketHandlers(io, socket);
 });

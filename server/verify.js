@@ -5,30 +5,35 @@ const { io } = require("socket.io-client");
 async function checkUrl(url) {
   const res = await fetch(url);
   const text = await res.text();
-  return { status: res.status, body: text };
+  return { status: res.status, body: text, headers: res.headers };
 }
 
-// Test 1: Socket.IO Ping-Pong Handshake
-async function testSocketPingPong(serverUrl) {
+// Test 1: Socket.IO Connection Acknowledgment & Ping-Pong
+async function testSocketConnectionAndPingPong(serverUrl) {
   return new Promise((resolve, reject) => {
     const socket = io(serverUrl, {
       transports: ["websocket", "polling"],
       timeout: 5000,
     });
 
+    let ackReceived = null;
+    let pongReceived = null;
+
     const timeout = setTimeout(() => {
       socket.disconnect();
-      reject(new Error("Socket.IO pong response timed out after 5000ms"));
+      reject(new Error("Socket.IO connection/pong response timed out after 5000ms"));
     }, 5000);
 
-    socket.on("connect", () => {
+    socket.on("connectionAck", (ack) => {
+      ackReceived = ack;
       socket.emit("ping", { message: "ping from test client", sentAt: Date.now() });
     });
 
     socket.on("pong", (data) => {
+      pongReceived = data;
       clearTimeout(timeout);
       socket.disconnect();
-      resolve(data);
+      resolve({ ackReceived, pongReceived });
     });
 
     socket.on("connect_error", (err) => {
@@ -133,7 +138,7 @@ async function testBackendValidation(serverUrl) {
   });
 }
 
-// Test 4: Proper User Disconnection Handling & Peer Notification
+// Test 4: Proper User Disconnection Lifecycle Handling
 async function testDisconnectionHandling(serverUrl) {
   return new Promise((resolve, reject) => {
     const observerClient = io(serverUrl, { transports: ["websocket", "polling"], timeout: 5000 });
@@ -149,8 +154,9 @@ async function testDisconnectionHandling(serverUrl) {
 
     leavingClient.on("connect", () => {
       leavingClientId = leavingClient.id;
+      // Trigger voluntary disconnect
       setTimeout(() => {
-        leavingClient.disconnect();
+        leavingClient.emit("clientDisconnect");
       }, 500);
     });
 
@@ -167,7 +173,7 @@ async function testDisconnectionHandling(serverUrl) {
   });
 }
 
-// Test 5: Room Join/Leave Logic & Participant Updates for Voice Communication
+// Test 5: Room Join/Leave Logic & Participant Updates
 async function testRoomJoinAndParticipantUpdates(serverUrl) {
   return new Promise((resolve, reject) => {
     const client1 = io(serverUrl, { transports: ["websocket", "polling"], timeout: 5000 });
@@ -183,16 +189,13 @@ async function testRoomJoinAndParticipantUpdates(serverUrl) {
       reject(new Error("Room join/leave and participant update test timed out"));
     }, 6000);
 
-    // Client 1 checks for Client 2 joining main-office
     client1.on("participantJoined", (user) => {
       if (user.id === client2.id && user.roomId === "main-office") {
         client2JoinedReceived = true;
-        // Trigger Client 2 to switch room to conference-1
         client2.emit("joinRoom", { roomId: "conference-1", username: "VoiceTester-2" });
       }
     });
 
-    // Client 1 checks for Client 2 leaving main-office
     client1.on("participantLeft", (data) => {
       if (data.id === client2.id && data.roomId === "main-office") {
         client2LeftReceived = true;
@@ -200,7 +203,6 @@ async function testRoomJoinAndParticipantUpdates(serverUrl) {
       }
     });
 
-    // Client 2 verifies receiving roomParticipants for conference-1
     client2.on("roomParticipants", (data) => {
       if (data.roomId === "conference-1") {
         const foundSelf = data.participants.some((p) => p.id === client2.id);
@@ -264,8 +266,8 @@ async function runTest() {
     console.log("\n--- [2] Checking Health Endpoint: GET /api/health ---");
     const healthRes = await checkUrl("http://localhost:5000/api/health");
     const healthJson = JSON.parse(healthRes.body);
-    if (healthRes.status === 200 && healthJson.status === "OK" && healthJson.project === "ProxiSpeak") {
-      console.log("--> PASS: /api/health returns valid status JSON.");
+    if (healthRes.status === 200 && healthJson.status === "OK" && healthJson.project === "ProxiSpeak" && healthJson.timestamp) {
+      console.log("--> PASS: /api/health returns valid status JSON with timestamp.");
     } else {
       console.error("--> FAIL: /api/health invalid response.");
       hasErrors = true;
@@ -275,8 +277,8 @@ async function runTest() {
     console.log("\n--- [3] Checking Status Endpoint: GET /api/status ---");
     const statusRes = await checkUrl("http://localhost:5000/api/status");
     const statusJson = JSON.parse(statusRes.body);
-    if (statusRes.status === 200 && statusJson.status === "active") {
-      console.log(`--> PASS: /api/status active (uptime: ${statusJson.uptime}).`);
+    if (statusRes.status === 200 && statusJson.status === "active" && typeof statusJson.activeUsers === "number") {
+      console.log(`--> PASS: /api/status active (uptime: ${statusJson.uptime}, activeUsers: ${statusJson.activeUsers}).`);
     } else {
       console.error("--> FAIL: /api/status invalid response.");
       hasErrors = true;
@@ -292,13 +294,13 @@ async function runTest() {
       hasErrors = true;
     }
 
-    // 5. Socket.IO Ping-Pong Event
-    console.log("\n--- [5] Testing Socket.IO Ping-Pong Event ---");
-    const pongResponse = await testSocketPingPong("http://localhost:5000");
-    if (pongResponse) {
-      console.log("--> PASS: Client sent 'ping', server responded with 'pong'.");
+    // 5. Socket.IO Connection Acknowledgment & Ping-Pong Event
+    console.log("\n--- [5] Testing Socket.IO Connection Acknowledgment & Ping-Pong ---");
+    const connTest = await testSocketConnectionAndPingPong("http://localhost:5000");
+    if (connTest.ackReceived && connTest.ackReceived.status === "connected" && connTest.pongReceived) {
+      console.log("--> PASS: Client received connectionAck and pong response successfully.");
     } else {
-      console.error("--> FAIL: Ping-Pong event failed.");
+      console.error("--> FAIL: ConnectionAck or Ping-Pong event failed.");
       hasErrors = true;
     }
 
@@ -324,10 +326,10 @@ async function runTest() {
     }
 
     // 8. Proper User Disconnection Handling
-    console.log("\n--- [8] Testing Proper User Disconnection Handling ---");
+    console.log("\n--- [8] Testing Proper User Disconnection Lifecycle ---");
     const disconnectResult = await testDisconnectionHandling("http://localhost:5000");
     if (disconnectResult && disconnectResult.disconnectedId) {
-      console.log(`--> PASS: Disconnection of ${disconnectResult.disconnectedId} broadcasted to peers with cleanup.`);
+      console.log(`--> PASS: Client disconnection of ${disconnectResult.disconnectedId} broadcasted to peers with cleanup.`);
     } else {
       console.error("--> FAIL: Disconnection handling failed.");
       hasErrors = true;

@@ -70,7 +70,9 @@ function getRoomParticipants(roomId) {
 }
 
 function registerSocketHandlers(io, socket) {
-  console.log(`[SOCKET CONNECT] User connected: ${socket.id}`);
+  const clientIp = socket.handshake.headers["x-forwarded-for"] || socket.handshake.address;
+  const transportName = socket.conn.transport.name;
+  console.log(`[SOCKET CONNECT] User connected: ${socket.id} (IP: ${clientIp}, Transport: ${transportName})`);
 
   socket.on("error", (err) => {
     console.error(`[SOCKET ERROR] Socket ${socket.id} error:`, err?.message || err);
@@ -91,18 +93,26 @@ function registerSocketHandlers(io, socket) {
   // Automatically join default room
   socket.join(DEFAULT_ROOM);
 
-  // 1. Initial sync: Send current room participants and all users to newly connected client
+  // 1. Connection Acknowledgment: Confirm connection to the client with session metadata
+  socket.emit("connectionAck", {
+    status: "connected",
+    socketId: socket.id,
+    user: defaultUser,
+    serverTime: new Date().toISOString(),
+  });
+
+  // 2. Initial sync: Send current room participants and all users to newly connected client
   socket.emit("roomParticipants", {
     roomId: DEFAULT_ROOM,
     participants: getRoomParticipants(DEFAULT_ROOM),
   });
   socket.emit("currentUsers", Array.from(users.values()));
 
-  // 2. Broadcast to peers in default room that a participant joined
+  // 3. Broadcast to peers in default room that a participant joined
   socket.to(DEFAULT_ROOM).emit("participantJoined", defaultUser);
   socket.broadcast.emit("userJoined", defaultUser);
 
-  // 3. Room Join / Switch Handler
+  // 4. Room Join / Switch Handler
   socket.on("joinRoom", (data = {}) => {
     try {
       const user = users.get(socket.id);
@@ -112,7 +122,6 @@ function registerSocketHandlers(io, socket) {
       const oldRoom = user.roomId;
 
       if (oldRoom === targetRoom) {
-        // Already in target room; send latest participant list
         socket.emit("roomParticipants", {
           roomId: targetRoom,
           participants: getRoomParticipants(targetRoom),
@@ -138,13 +147,11 @@ function registerSocketHandlers(io, socket) {
 
       console.log(`[ROOM SWITCH] User ${socket.id} moved from ${oldRoom} to ${targetRoom}`);
 
-      // Send participant list of new room to joining user
       socket.emit("roomParticipants", {
         roomId: targetRoom,
         participants: getRoomParticipants(targetRoom),
       });
 
-      // Notify other members of new room
       socket.to(targetRoom).emit("participantJoined", user);
     } catch (err) {
       console.error(`[JOIN ROOM ERROR] ${socket.id}:`, err.message);
@@ -166,7 +173,7 @@ function registerSocketHandlers(io, socket) {
     socket.broadcast.emit("userJoined", user);
   });
 
-  // 4. Leave Room Handler
+  // 5. Leave Room Handler
   socket.on("leaveRoom", (data = {}) => {
     try {
       const user = users.get(socket.id);
@@ -196,7 +203,7 @@ function registerSocketHandlers(io, socket) {
     }
   });
 
-  // 5. Get participants for a room
+  // 6. Get participants for a room
   socket.on("getParticipants", (data = {}, callback) => {
     const roomId = sanitizeRoomId(data.roomId || DEFAULT_ROOM);
     const participants = getRoomParticipants(roomId);
@@ -207,7 +214,7 @@ function registerSocketHandlers(io, socket) {
     }
   });
 
-  // 6. User Position Updates & Broadcasting
+  // 7. User Position Updates & Broadcasting
   socket.on("updatePosition", (positionData) => {
     try {
       if (!positionData || typeof positionData !== "object" || Array.isArray(positionData)) {
@@ -244,7 +251,6 @@ function registerSocketHandlers(io, socket) {
         y: boundedY,
       };
 
-      // Broadcast position updates to all connected peers in the virtual office
       socket.broadcast.emit("userPositionUpdated", updatePayload);
       socket.broadcast.emit("userMoved", updatePayload);
     } catch (err) {
@@ -257,7 +263,7 @@ function registerSocketHandlers(io, socket) {
     socket.emit("updatePosition", positionData);
   });
 
-  // 7. WebRTC Signaling Relays for Voice Communication
+  // 8. WebRTC Signaling Relays for Voice Communication
   socket.on("signal:offer", ({ targetId, offer }) => {
     if (targetId && offer) {
       io.to(targetId).emit("signal:offer", {
@@ -285,27 +291,41 @@ function registerSocketHandlers(io, socket) {
     }
   });
 
-  // 8. Ping-Pong event (maintains backward compatibility)
+  // 9. Ping-Pong event (maintains backward compatibility)
   socket.on("ping", (data) => {
     socket.emit("pong", data || "pong");
   });
 
-  // 9. Disconnection & Cleanup
+  // 10. Voluntary Client Disconnection Request
+  socket.on("clientDisconnect", () => {
+    console.log(`[CLIENT DISCONNECT REQUEST] Client ${socket.id} requested disconnect`);
+    socket.disconnect(true);
+  });
+
+  // 11. Disconnecting Lifecycle (Fired BEFORE leaving rooms)
+  socket.on("disconnecting", (reason) => {
+    const existingUser = users.get(socket.id);
+    console.log(`[SOCKET DISCONNECTING] User ${socket.id} disconnecting. Reason: ${reason}. Active rooms:`, Array.from(socket.rooms));
+
+    // Notify all rooms the socket was part of before room sets are cleared
+    for (const room of socket.rooms) {
+      if (room !== socket.id) {
+        socket.to(room).emit("participantLeft", {
+          id: socket.id,
+          username: existingUser?.username || `User-${socket.id.slice(0, 4)}`,
+          roomId: room,
+          reason,
+        });
+      }
+    }
+  });
+
+  // 12. Disconnect Lifecycle (Fired AFTER leaving rooms)
   socket.on("disconnect", (reason) => {
     console.log(`[SOCKET DISCONNECT] User disconnected: ${socket.id} (Reason: ${reason})`);
 
     const existingUser = users.get(socket.id);
     users.delete(socket.id);
-
-    if (existingUser) {
-      // Notify participants in user's room
-      socket.to(existingUser.roomId).emit("participantLeft", {
-        id: socket.id,
-        username: existingUser.username,
-        roomId: existingUser.roomId,
-        reason,
-      });
-    }
 
     // Notify all remaining clients across the server
     const disconnectPayload = {
