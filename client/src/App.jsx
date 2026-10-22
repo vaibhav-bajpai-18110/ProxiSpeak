@@ -73,6 +73,17 @@ function normalizeParticipant(participant, ownSocketId) {
   };
 }
 
+function mergeParticipant(participant, previous) {
+  if (!previous) return participant;
+  return {
+    ...previous,
+    ...participant,
+    name: participant.name && participant.name !== "Guest" ? participant.name : previous.name,
+    position: participant.position || previous.position || null,
+    color: participant.color || previous.color || "",
+  };
+}
+
 function App() {
   const [started, setStarted] = useState(false);
   const [apiStatus, setApiStatus] = useState("loading");
@@ -178,15 +189,21 @@ function App() {
         .map((participant) => normalizeParticipant(participant, socket.id))
         .filter(Boolean)
         .map((participant) => participant.isYou ? { ...participant, name: username } : participant);
-      setParticipants(normalized);
+      setParticipants((current) => {
+        const existingById = new Map(current.map((participant) => [participant.id, participant]));
+        return normalized.map((participant) => mergeParticipant(participant, existingById.get(participant.id)));
+      });
     };
     const handleParticipantJoined = (participant) => {
       const normalized = normalizeParticipant(participant, socket.id);
       if (!normalized) return;
-      setParticipants((current) => [
-        ...current.filter((person) => person.id !== normalized.id),
-        normalized,
-      ]);
+      setParticipants((current) => {
+        const existing = current.find((person) => person.id === normalized.id);
+        return [
+          ...current.filter((person) => person.id !== normalized.id),
+          mergeParticipant(normalized, existing),
+        ];
+      });
     };
     const handleParticipantLeft = (participant) => {
       if (typeof participant?.id !== "string") return;
@@ -199,7 +216,7 @@ function App() {
         const exists = current.some((person) => person.id === normalized.id);
         if (!exists) return [...current, normalized];
         return current.map((person) => person.id === normalized.id
-          ? { ...person, name: normalized.name || person.name, position: normalized.position }
+          ? mergeParticipant(normalized, person)
           : person);
       });
     };
