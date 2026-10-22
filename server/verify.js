@@ -154,7 +154,6 @@ async function testDisconnectionHandling(serverUrl) {
 
     leavingClient.on("connect", () => {
       leavingClientId = leavingClient.id;
-      // Trigger voluntary disconnect
       setTimeout(() => {
         leavingClient.emit("clientDisconnect");
       }, 500);
@@ -224,6 +223,98 @@ async function testRoomJoinAndParticipantUpdates(serverUrl) {
 
     client1.on("connect_error", (e) => reject(e));
     client2.on("connect_error", (e) => reject(e));
+  });
+}
+
+// Test 6: Multiple Simultaneous Connections & Duplicate Guards
+async function testMultipleSimultaneousConnections(serverUrl, clientCount = 6) {
+  return new Promise(async (resolve, reject) => {
+    const clients = [];
+    const timeout = setTimeout(() => {
+      clients.forEach((c) => c.disconnect());
+      reject(new Error("Simultaneous connections test timed out"));
+    }, 10000);
+
+    try {
+      // Step A: Connect all clients concurrently
+      const connectPromises = [];
+      for (let i = 0; i < clientCount; i++) {
+        const socket = io(serverUrl, { transports: ["websocket", "polling"], timeout: 5000 });
+        clients.push(socket);
+        connectPromises.push(
+          new Promise((res, rej) => {
+            socket.on("connect", () => res(socket.id));
+            socket.on("connect_error", rej);
+          })
+        );
+      }
+
+      const connectedIds = await Promise.all(connectPromises);
+      const client0Id = connectedIds[0];
+      const client1Id = connectedIds[1];
+
+      // Step B: Duplicate Join Protection Check on Client 0
+      let duplicateParticipantJoinedCount = 0;
+      clients[1].on("participantJoined", (user) => {
+        if (user.id === client0Id) {
+          duplicateParticipantJoinedCount++;
+        }
+      });
+
+      // Send 3 duplicate join requests with identical data
+      clients[0].emit("joinRoom", { roomId: "main-office" });
+      clients[0].emit("joinRoom", { roomId: "main-office" });
+      clients[0].emit("join", { username: `User-${client0Id.slice(0, 4)}` });
+
+      await new Promise((r) => setTimeout(r, 600));
+
+      // Step C: Concurrent Position Updates across all clients
+      let updatesReceivedByClient0 = 0;
+      clients[0].on("userPositionUpdated", (data) => {
+        if (data.id !== client0Id) {
+          updatesReceivedByClient0++;
+        }
+      });
+
+      // All other clients concurrently broadcast unique positions
+      for (let i = 1; i < clientCount; i++) {
+        clients[i].emit("updatePosition", { x: 100 * i, y: 150 * i });
+      }
+
+      await new Promise((r) => setTimeout(r, 800));
+
+      // Step D: Duplicate Disconnect Safety on Client 1
+      let client1DisconnectEventCount = 0;
+      clients[0].on("userDisconnected", (data) => {
+        if (data.id === client1Id) {
+          client1DisconnectEventCount++;
+        }
+      });
+
+      // Emit voluntary clientDisconnect AND close socket transport
+      clients[1].emit("clientDisconnect");
+      clients[1].disconnect();
+
+      await new Promise((r) => setTimeout(r, 600));
+
+      // Cleanup remaining clients
+      clients.forEach((c) => {
+        if (c.connected) c.disconnect();
+      });
+
+      clearTimeout(timeout);
+
+      resolve({
+        connectedCount: connectedIds.length,
+        duplicateJoinsIgnored: duplicateParticipantJoinedCount === 0,
+        concurrentUpdatesReceived: updatesReceivedByClient0 === clientCount - 1,
+        duplicateDisconnectSafelyHandled: client1DisconnectEventCount === 1,
+      });
+    } catch (err) {
+      clearTimeout(timeout);
+      clients.forEach((c) => c.disconnect());
+      reject(err);
+    }
   });
 }
 
@@ -345,6 +436,24 @@ async function runTest() {
       hasErrors = true;
     }
 
+    // 10. Multiple Simultaneous Connections & Duplicate Event Handling
+    console.log("\n--- [10] Testing Multiple Simultaneous Connections & Duplicate Guards ---");
+    const concurrentResult = await testMultipleSimultaneousConnections("http://localhost:5000", 6);
+    if (
+      concurrentResult.connectedCount === 6 &&
+      concurrentResult.duplicateJoinsIgnored &&
+      concurrentResult.concurrentUpdatesReceived &&
+      concurrentResult.duplicateDisconnectSafelyHandled
+    ) {
+      console.log(`--> PASS: Successfully managed ${concurrentResult.connectedCount} simultaneous connections.`);
+      console.log("--> PASS: Duplicate join events safely ignored (zero redundant participantJoined floods).");
+      console.log("--> PASS: Concurrent position updates broadcasted to all peers without race conditions.");
+      console.log("--> PASS: Duplicate disconnect attempts handled safely with single broadcast.");
+    } else {
+      console.error("--> FAIL: Simultaneous connection test failed:", concurrentResult);
+      hasErrors = true;
+    }
+
   } catch (err) {
     console.error("\n[TEST RUNNER EXCEPTION]:", err.message || err);
     hasErrors = true;
@@ -358,7 +467,7 @@ async function runTest() {
       console.error("\n❌ VERIFICATION FAILED: One or more tests did not pass.\n");
       process.exit(1);
     } else {
-      console.log("\n✅ ALL TESTS PASSED: All 9 backend modules, room logic, and socket events verified.\n");
+      console.log("\n✅ ALL TESTS PASSED: All 10 backend modules, concurrency tests, and socket events verified.\n");
       process.exit(0);
     }
   }

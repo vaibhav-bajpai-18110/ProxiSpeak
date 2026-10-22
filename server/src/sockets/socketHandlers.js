@@ -1,7 +1,7 @@
 /**
  * Socket.IO event handlers for ProxiSpeak
  * Handles connection lifecycle, strict input validation, real-time position broadcasting,
- * room join/leave logic, and participant updates for voice communication.
+ * room join/leave logic, participant updates, duplicate event protection, and concurrency safety.
  */
 
 // In-memory store of active users: socket.id -> { id, username, roomId, x, y, color }
@@ -108,11 +108,11 @@ function registerSocketHandlers(io, socket) {
   });
   socket.emit("currentUsers", Array.from(users.values()));
 
-  // 3. Broadcast to peers in default room that a participant joined
+  // 3. Broadcast to peers that a participant/user joined
   socket.to(DEFAULT_ROOM).emit("participantJoined", defaultUser);
   socket.broadcast.emit("userJoined", defaultUser);
 
-  // 4. Room Join / Switch Handler
+  // 4. Room Join / Switch Handler with Duplicate Join Protection
   socket.on("joinRoom", (data = {}) => {
     try {
       const user = users.get(socket.id);
@@ -120,8 +120,10 @@ function registerSocketHandlers(io, socket) {
 
       const targetRoom = sanitizeRoomId(data.roomId || DEFAULT_ROOM);
       const oldRoom = user.roomId;
+      const targetUsername = data.username ? sanitizeUsername(data.username, user.username) : user.username;
 
-      if (oldRoom === targetRoom) {
+      // Duplicate Join Guard: If user is already in the room and username is unchanged, ignore redundant join
+      if (oldRoom === targetRoom && user.username === targetUsername) {
         socket.emit("roomParticipants", {
           roomId: targetRoom,
           participants: getRoomParticipants(targetRoom),
@@ -129,7 +131,20 @@ function registerSocketHandlers(io, socket) {
         return;
       }
 
-      // Leave old room
+      // If room is unchanged but username changed, update and notify room
+      if (oldRoom === targetRoom) {
+        user.username = targetUsername;
+        users.set(socket.id, user);
+        socket.to(targetRoom).emit("participantJoined", user);
+        socket.broadcast.emit("userJoined", user);
+        socket.emit("roomParticipants", {
+          roomId: targetRoom,
+          participants: getRoomParticipants(targetRoom),
+        });
+        return;
+      }
+
+      // Room Switch: Leave old room
       socket.leave(oldRoom);
       socket.to(oldRoom).emit("participantLeft", {
         id: socket.id,
@@ -140,9 +155,7 @@ function registerSocketHandlers(io, socket) {
       // Join new room
       socket.join(targetRoom);
       user.roomId = targetRoom;
-      if (data.username) {
-        user.username = sanitizeUsername(data.username, user.username);
-      }
+      user.username = targetUsername;
       users.set(socket.id, user);
 
       console.log(`[ROOM SWITCH] User ${socket.id} moved from ${oldRoom} to ${targetRoom}`);
@@ -159,16 +172,22 @@ function registerSocketHandlers(io, socket) {
     }
   });
 
-  // Alias join handler
+  // Alias join handler with duplicate join check
   socket.on("join", (userData = {}) => {
     const user = users.get(socket.id) || defaultUser;
-    if (userData.username) {
-      user.username = sanitizeUsername(userData.username, user.username);
-    }
+    const targetUsername = userData.username ? sanitizeUsername(userData.username, user.username) : user.username;
+
     if (userData.roomId) {
-      socket.emit("joinRoom", { roomId: userData.roomId, username: user.username });
+      socket.emit("joinRoom", { roomId: userData.roomId, username: targetUsername });
       return;
     }
+
+    // If username didn't change, avoid redundant broadcast
+    if (user.username === targetUsername && users.has(socket.id)) {
+      return;
+    }
+
+    user.username = targetUsername;
     users.set(socket.id, user);
     socket.broadcast.emit("userJoined", user);
   });
@@ -180,6 +199,12 @@ function registerSocketHandlers(io, socket) {
       if (!user) return;
 
       const roomToLeave = sanitizeRoomId(data.roomId || user.roomId);
+
+      // Guard: already in default room
+      if (roomToLeave === DEFAULT_ROOM) {
+        return;
+      }
+
       socket.leave(roomToLeave);
 
       socket.to(roomToLeave).emit("participantLeft", {
@@ -251,6 +276,7 @@ function registerSocketHandlers(io, socket) {
         y: boundedY,
       };
 
+      // Broadcast position updates to all other connected clients
       socket.broadcast.emit("userPositionUpdated", updatePayload);
       socket.broadcast.emit("userMoved", updatePayload);
     } catch (err) {
@@ -307,7 +333,6 @@ function registerSocketHandlers(io, socket) {
     const existingUser = users.get(socket.id);
     console.log(`[SOCKET DISCONNECTING] User ${socket.id} disconnecting. Reason: ${reason}. Active rooms:`, Array.from(socket.rooms));
 
-    // Notify all rooms the socket was part of before room sets are cleared
     for (const room of socket.rooms) {
       if (room !== socket.id) {
         socket.to(room).emit("participantLeft", {
@@ -320,14 +345,18 @@ function registerSocketHandlers(io, socket) {
     }
   });
 
-  // 12. Disconnect Lifecycle (Fired AFTER leaving rooms)
+  // 12. Disconnect Lifecycle with Duplicate Disconnect Protection
   socket.on("disconnect", (reason) => {
-    console.log(`[SOCKET DISCONNECT] User disconnected: ${socket.id} (Reason: ${reason})`);
+    // Duplicate Disconnect Guard: Ensure cleanup only happens once per socket
+    if (!users.has(socket.id)) {
+      return;
+    }
 
     const existingUser = users.get(socket.id);
     users.delete(socket.id);
 
-    // Notify all remaining clients across the server
+    console.log(`[SOCKET DISCONNECT] User disconnected: ${socket.id} (Reason: ${reason}). Remaining users: ${users.size}`);
+
     const disconnectPayload = {
       id: socket.id,
       username: existingUser?.username || `User-${socket.id.slice(0, 4)}`,
