@@ -11,13 +11,13 @@ proxyspeak/
 ├── server/                   # Backend (Node.js, Express, Socket.IO)
 │   ├── public/               # Interactive 2D Canvas testing client
 │   ├── src/
-│   │   ├── index.js          # Express server and REST API endpoints
-│   │   ├── sockets/          # Real-time Socket.IO room & movement handlers
+│   │   ├── index.js          # Express server, REST APIs, & process safety nets
+│   │   ├── sockets/          # Real-time Socket.IO room, movement, & WebRTC handlers
 │   │   └── services/         # Proximity & spatial calculation helpers
-│   ├── verify.js             # Automated 9-module test suite
-│   ├── package.json          # Dependencies and scripts
-│   └── README.md             # Detailed backend API & event documentation
-└── README.md                 # Project overview
+│   ├── verify.js             # Automated 12-module integration test suite
+│   ├── package.json          # Dependencies and scripts (start, test)
+│   └── README.md             # Complete backend API & Socket.IO documentation
+└── README.md                 # Project overview & quick start
 ```
 
 ---
@@ -41,7 +41,15 @@ The server will start on `http://localhost:5000`.
 cd server
 npm test
 ```
-Runs the full 9-module verification suite covering API endpoints (`/api/health`, `/api/status`), Socket.IO connection/disconnection lifecycles, real-time avatar movements, and room switching.
+Runs the comprehensive 12-module verification suite covering:
+- REST API contracts (`/api/health`, `/api/status`, root, and 404 handler)
+- Socket.IO connection and ping-pong latency checks
+- Real-time multi-client avatar position synchronization
+- Strict input validation and boundary clamping `[0, 2000]`
+- Room join/leave logic and voice participant management
+- Duplicate join and duplicate disconnect event protection
+- WebRTC audio signaling relays and offline target validation
+- High-churn reconnection and repeated connection resilience
 
 ### 4. Interactive 2D Visual Demo
 Open [http://localhost:5000/demo](http://localhost:5000/demo) in two separate browser windows to test real-time avatar movement, proximity boundaries, and live room switching between Main Office, Meeting Rooms, and the Lounge!
@@ -49,4 +57,4 @@ Open [http://localhost:5000/demo](http://localhost:5000/demo) in two separate br
 ---
 
 ## Detailed Documentation
-For detailed REST API endpoints, Socket.IO event specifications, and connection lifecycle handling, please refer to the [Backend Documentation](server/README.md).
+For detailed REST API endpoint tables, Socket.IO event specifications, frontend integration contracts, and connection lifecycle handling, please refer to the [Backend Documentation](server/README.md).

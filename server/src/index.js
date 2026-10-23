@@ -7,9 +7,22 @@ require("dotenv").config();
 
 const { registerSocketHandlers, getUserCount } = require("./sockets/socketHandlers");
 
+// Process-level error safety nets to prevent server crashes
+process.on("unhandledRejection", (err) => {
+  console.error("[UNHANDLED REJECTION]:", err?.message || err);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("[UNCAUGHT EXCEPTION]:", err?.message || err);
+});
+
 const app = express();
 
-app.use(cors());
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+}));
 app.use(express.json());
 
 const server = http.createServer(app);
@@ -17,8 +30,10 @@ const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
     origin: "*",
-    methods: ["GET", "POST"]
-  }
+    methods: ["GET", "POST"],
+  },
+  pingTimeout: 10000,
+  pingInterval: 5000,
 });
 
 // Root API route
@@ -40,7 +55,7 @@ app.get("/api/health", (req, res) => {
   res.json({
     status: "OK",
     project: "ProxiSpeak",
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
   });
 });
 
@@ -52,7 +67,7 @@ app.get("/api/status", (req, res) => {
     message: "ProxiSpeak server is operational",
     uptime: `${Math.floor(process.uptime())}s`,
     activeUsers: getUserCount(),
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
   });
 });
 
@@ -67,6 +82,9 @@ app.use((req, res, next) => {
 // Global Error Handling Middleware
 app.use((err, req, res, next) => {
   console.error("[SERVER ERROR]:", err);
+  if (res.headersSent) {
+    return next(err);
+  }
   res.status(500).json({ error: "Internal Server Error", message: err.message });
 });
 

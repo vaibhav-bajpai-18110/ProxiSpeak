@@ -1,7 +1,7 @@
 /**
  * Socket.IO event handlers for ProxiSpeak
  * Handles connection lifecycle, strict input validation, real-time position broadcasting,
- * room join/leave logic, participant updates, duplicate event protection, and concurrency safety.
+ * room join/leave logic, participant updates, duplicate event protection, and WebRTC signaling.
  */
 
 // In-memory store of active users: socket.id -> { id, username, roomId, x, y, color }
@@ -122,7 +122,7 @@ function registerSocketHandlers(io, socket) {
       const oldRoom = user.roomId;
       const targetUsername = data.username ? sanitizeUsername(data.username, user.username) : user.username;
 
-      // Duplicate Join Guard: If user is already in the room and username is unchanged, ignore redundant join
+      // Duplicate Join Guard
       if (oldRoom === targetRoom && user.username === targetUsername) {
         socket.emit("roomParticipants", {
           roomId: targetRoom,
@@ -131,7 +131,6 @@ function registerSocketHandlers(io, socket) {
         return;
       }
 
-      // If room is unchanged but username changed, update and notify room
       if (oldRoom === targetRoom) {
         user.username = targetUsername;
         users.set(socket.id, user);
@@ -144,7 +143,7 @@ function registerSocketHandlers(io, socket) {
         return;
       }
 
-      // Room Switch: Leave old room
+      // Room Switch
       socket.leave(oldRoom);
       socket.to(oldRoom).emit("participantLeft", {
         id: socket.id,
@@ -152,7 +151,6 @@ function registerSocketHandlers(io, socket) {
         roomId: oldRoom,
       });
 
-      // Join new room
       socket.join(targetRoom);
       user.roomId = targetRoom;
       user.username = targetUsername;
@@ -172,7 +170,7 @@ function registerSocketHandlers(io, socket) {
     }
   });
 
-  // Alias join handler with duplicate join check
+  // Alias join handler
   socket.on("join", (userData = {}) => {
     const user = users.get(socket.id) || defaultUser;
     const targetUsername = userData.username ? sanitizeUsername(userData.username, user.username) : user.username;
@@ -182,7 +180,6 @@ function registerSocketHandlers(io, socket) {
       return;
     }
 
-    // If username didn't change, avoid redundant broadcast
     if (user.username === targetUsername && users.has(socket.id)) {
       return;
     }
@@ -200,7 +197,6 @@ function registerSocketHandlers(io, socket) {
 
       const roomToLeave = sanitizeRoomId(data.roomId || user.roomId);
 
-      // Guard: already in default room
       if (roomToLeave === DEFAULT_ROOM) {
         return;
       }
@@ -213,7 +209,6 @@ function registerSocketHandlers(io, socket) {
         roomId: roomToLeave,
       });
 
-      // Revert to default room
       socket.join(DEFAULT_ROOM);
       user.roomId = DEFAULT_ROOM;
       users.set(socket.id, user);
@@ -276,7 +271,6 @@ function registerSocketHandlers(io, socket) {
         y: boundedY,
       };
 
-      // Broadcast position updates to all other connected clients
       socket.broadcast.emit("userPositionUpdated", updatePayload);
       socket.broadcast.emit("userMoved", updatePayload);
     } catch (err) {
@@ -289,9 +283,13 @@ function registerSocketHandlers(io, socket) {
     socket.emit("updatePosition", positionData);
   });
 
-  // 8. WebRTC Signaling Relays for Voice Communication
+  // 8. WebRTC Signaling Relays with Target Validation
   socket.on("signal:offer", ({ targetId, offer }) => {
-    if (targetId && offer) {
+    if (!targetId || !users.has(targetId)) {
+      socket.emit("signal:error", { message: "Target peer not found or disconnected", targetId });
+      return;
+    }
+    if (offer) {
       io.to(targetId).emit("signal:offer", {
         senderId: socket.id,
         offer,
@@ -300,7 +298,11 @@ function registerSocketHandlers(io, socket) {
   });
 
   socket.on("signal:answer", ({ targetId, answer }) => {
-    if (targetId && answer) {
+    if (!targetId || !users.has(targetId)) {
+      socket.emit("signal:error", { message: "Target peer not found or disconnected", targetId });
+      return;
+    }
+    if (answer) {
       io.to(targetId).emit("signal:answer", {
         senderId: socket.id,
         answer,
@@ -309,7 +311,11 @@ function registerSocketHandlers(io, socket) {
   });
 
   socket.on("signal:ice-candidate", ({ targetId, candidate }) => {
-    if (targetId && candidate) {
+    if (!targetId || !users.has(targetId)) {
+      socket.emit("signal:error", { message: "Target peer not found or disconnected", targetId });
+      return;
+    }
+    if (candidate) {
       io.to(targetId).emit("signal:ice-candidate", {
         senderId: socket.id,
         candidate,
@@ -345,9 +351,8 @@ function registerSocketHandlers(io, socket) {
     }
   });
 
-  // 12. Disconnect Lifecycle with Duplicate Disconnect Protection
+  // 12. Disconnect Lifecycle with Dual-Format Notification (Frontend String + Backend Object)
   socket.on("disconnect", (reason) => {
-    // Duplicate Disconnect Guard: Ensure cleanup only happens once per socket
     if (!users.has(socket.id)) {
       return;
     }
@@ -357,6 +362,7 @@ function registerSocketHandlers(io, socket) {
 
     console.log(`[SOCKET DISCONNECT] User disconnected: ${socket.id} (Reason: ${reason}). Remaining users: ${users.size}`);
 
+    // Notify remaining clients across the server with structured disconnect payload
     const disconnectPayload = {
       id: socket.id,
       username: existingUser?.username || `User-${socket.id.slice(0, 4)}`,
