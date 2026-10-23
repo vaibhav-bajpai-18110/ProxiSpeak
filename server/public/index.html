@@ -139,7 +139,7 @@
 <body>
   <header>
     <div>
-      <h1>ProxiSpeak — Avatar Movement</h1>
+      <h1>ProxiSpeak Ã¢â‚¬â€ Avatar Movement</h1>
       <p style="color: #94a3b8; font-size: 0.85rem; margin-top: 2px;">
         Real-time multi-user position sync via Socket.IO
       </p>
@@ -154,7 +154,7 @@
     <div class="hud-bar">
       <div class="hud-item">
         <span class="hud-label">Your ID:</span>
-        <span id="hudMyId" class="hud-val">—</span>
+        <span id="hudMyId" class="hud-val">Ã¢â‚¬â€</span>
       </div>
       <div class="hud-item">
         <span class="hud-label">Position:</span>
@@ -169,11 +169,19 @@
     <div class="canvas-card">
       <canvas id="gameCanvas" width="850" height="480"></canvas>
       <div class="controls-hint">
-        🎮 Move: <b>Arrow Keys</b>, <b>W A S D</b>, or <b>Click on Canvas</b>
+        Ã°Å¸Å½Â® Move: <b>Arrow Keys</b>, <b>W A S D</b>, or <b>Click on Canvas</b>
       </div>
     </div>
 
-    <div class="log-card" id="eventLog">
+    <div class="log-card" style="margin-bottom: 12px; font-family: sans-serif;">
+      <label for="sessionParticipant">Communication partner:</label>
+      <select id="sessionParticipant" style="margin: 8px; padding: 6px;">
+        <option value="">Select a connected user</option>
+      </select>
+      <button id="startSessionButton" type="button">Start Session</button>
+      <button id="endSessionButton" type="button" disabled>End Session</button>
+      <span id="sessionStatus" style="margin-left: 8px;">No active session</span>
+    </div>    <div class="log-card" id="eventLog">
       <div class="log-item"><span class="log-time">[System]</span> Initializing client...</div>
     </div>
   </div>
@@ -407,6 +415,101 @@
     }
 
     requestAnimationFrame(gameLoop);
-  </script>
+      // Communication session controls
+    const sessionParticipant = document.getElementById("sessionParticipant");
+    const startSessionButton = document.getElementById("startSessionButton");
+    const endSessionButton = document.getElementById("endSessionButton");
+    const sessionStatus = document.getElementById("sessionStatus");
+    let activeSessionId = null;
+    function updateSessionParticipants() {
+      const selectedId = sessionParticipant.value;
+      sessionParticipant.replaceChildren();
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = "Select a connected user";
+      sessionParticipant.appendChild(placeholder);
+      for (const [id, user] of otherUsers) {
+        const option = document.createElement("option");
+        option.value = id;
+        option.textContent = user.username || `User-${id.slice(0, 5)}`;
+        sessionParticipant.appendChild(option);
+      }
+      if (otherUsers.has(selectedId)) {
+        sessionParticipant.value = selectedId;
+      }
+    }
+    function resetSessionControls(message = "No active session") {
+      activeSessionId = null;
+      sessionStatus.textContent = message;
+      endSessionButton.disabled = true;
+      startSessionButton.disabled = false;
+    }
+    // Refresh the partner list after existing user handlers update the map.
+    socket.on("currentUsers", updateSessionParticipants);
+    socket.on("userJoined", updateSessionParticipants);
+    socket.on("userDisconnected", updateSessionParticipants);
+    startSessionButton.addEventListener("click", () => {
+      const participantId = sessionParticipant.value;
+      if (!participantId) {
+        sessionStatus.textContent = "Select a connected user first.";
+        return;
+      }
+      startSessionButton.disabled = true;
+      sessionStatus.textContent = "Starting session...";
+      socket.emit("startCommunicationSession", { participantId }, (result) => {
+        if (!result || result.error || !result.sessionId) {
+          sessionStatus.textContent =
+            (result && result.error) || "Could not start session.";
+          startSessionButton.disabled = false;
+          return;
+        }
+        activeSessionId = result.sessionId;
+        sessionStatus.textContent = "Communication session active";
+        endSessionButton.disabled = false;
+        startSessionButton.disabled = true;
+        logEvent("Communication session started", true);
+      });
+    });
+    endSessionButton.addEventListener("click", () => {
+      if (!activeSessionId) return;
+      const sessionId = activeSessionId;
+      endSessionButton.disabled = true;
+      sessionStatus.textContent = "Ending session...";
+      socket.emit("endCommunicationSession", { sessionId }, (result) => {
+        if (!result || result.error) {
+          sessionStatus.textContent =
+            (result && result.error) || "Could not end session.";
+          endSessionButton.disabled = false;
+          return;
+        }
+        resetSessionControls();
+        logEvent("Communication session ended", true);
+      });
+    });
+    // Handle sessions started by another connected user.
+    socket.on("communicationSessionStarted", (session) => {
+      if (!session || !session.sessionId) return;
+      activeSessionId = session.sessionId;
+      sessionStatus.textContent = "Communication session active";
+      endSessionButton.disabled = false;
+      startSessionButton.disabled = true;
+      logEvent("Communication session started by another user", true);
+    });
+    socket.on("communicationSessionEnded", (session) => {
+      if (
+        session &&
+        session.sessionId &&
+        activeSessionId &&
+        session.sessionId !== activeSessionId
+      ) {
+        return;
+      }
+      resetSessionControls();
+      logEvent("Communication session ended", true);
+    });
+    socket.on("disconnect", () => {
+      resetSessionControls("Disconnected from server");
+    });
+</script>
 </body>
 </html>
