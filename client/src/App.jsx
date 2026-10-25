@@ -22,8 +22,12 @@ function getSavedUsername() {
 }
 
 function getInitials(name = "") {
-  return name.trim().split(/\s+/).slice(0, 2)
-    .map((part) => part[0]?.toUpperCase() || "").join("");
+  return name
+    .trim()
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() || "")
+    .join("");
 }
 
 function clampPosition(position) {
@@ -34,9 +38,11 @@ function clampPosition(position) {
 }
 
 function isValidPosition(position) {
-  return position &&
+  return (
+    position &&
     Number.isFinite(position.x) &&
-    Number.isFinite(position.y);
+    Number.isFinite(position.y)
+  );
 }
 
 function normalizeUser(user, ownSocketId) {
@@ -47,7 +53,10 @@ function normalizeUser(user, ownSocketId) {
 
   return {
     id: user.id,
-    username: typeof user.username === "string" ? user.username : "Guest",
+    username:
+      typeof user.username === "string" && user.username.trim()
+        ? user.username
+        : "Guest",
     x: Number.isFinite(x)
       ? Math.min(92, Math.max(8, (x / MAP_SIZE) * 100))
       : INITIAL_POSITION.x,
@@ -72,14 +81,15 @@ function App() {
   const [socketStatus, setSocketStatus] = useState("idle");
   const [socketError, setSocketError] = useState("");
   const [message, setMessage] = useState("");
+
   const socketRef = useRef(null);
   const hasConnectedRef = useRef(false);
 
   const checkBackend = useCallback(async (signal) => {
     const requestController = new AbortController();
     const abortRequest = () => requestController.abort();
-    signal?.addEventListener("abort", abortRequest, { once: true });
 
+    signal?.addEventListener("abort", abortRequest, { once: true });
     const timeoutId = window.setTimeout(abortRequest, 8000);
 
     try {
@@ -123,6 +133,7 @@ function App() {
   useEffect(() => {
     const controller = new AbortController();
     void checkBackend(controller.signal);
+
     return () => controller.abort();
   }, [checkBackend]);
 
@@ -145,6 +156,7 @@ function App() {
     if (!cleanUsername || isJoining) return;
 
     setUsername(cleanUsername);
+
     try {
       window.localStorage.setItem(USERNAME_KEY, cleanUsername);
     } catch {
@@ -203,6 +215,7 @@ function App() {
 
       setRemoteUsers((current) => {
         const exists = current.some((item) => item.id === user.id);
+
         return exists
           ? current.map((item) =>
               item.id === user.id ? { ...item, ...user } : item
@@ -213,14 +226,14 @@ function App() {
 
     const removeUser = (data) => {
       const id = typeof data === "string" ? data : data?.id;
-      if (!id) return;
+      if (typeof id !== "string") return;
 
       setRemoteUsers((current) =>
         current.filter((user) => user.id !== id)
       );
     };
 
-    const handleUsersSnapshot = (payload) => {
+    const handleParticipantsSnapshot = (payload) => {
       const list = Array.isArray(payload)
         ? payload
         : payload?.participants;
@@ -232,6 +245,18 @@ function App() {
           .map((user) => normalizeUser(user, socket.id))
           .filter((user) => user && !user.isYou)
       );
+    };
+
+    const handleParticipantJoined = (participant) => {
+      upsertUser(participant);
+    };
+
+    const handleParticipantLeft = (participant) => {
+      removeUser(participant);
+    };
+
+    const handlePositionUpdate = (rawUser) => {
+      upsertUser(rawUser);
     };
 
     const handleConnect = () => {
@@ -265,10 +290,6 @@ function App() {
       setSocketError(error.message);
     };
 
-    const handlePositionUpdate = (rawUser) => {
-      upsertUser(rawUser);
-    };
-
     const handleOffline = () => {
       setSocketStatus("offline");
       setSocketError("Your device is offline.");
@@ -293,16 +314,21 @@ function App() {
     socket.on("disconnect", handleDisconnect);
     socket.on("connect_error", handleConnectError);
 
-    socket.on("currentUsers", handleUsersSnapshot);
-    socket.on("roomParticipants", handleUsersSnapshot);
-    socket.on("userJoined", upsertUser);
-    socket.on("participantJoined", upsertUser);
+    socket.on("currentUsers", handleParticipantsSnapshot);
+    socket.on("roomParticipants", handleParticipantsSnapshot);
+    socket.on("participantsSnapshot", handleParticipantsSnapshot);
+
+    socket.on("userJoined", handleParticipantJoined);
+    socket.on("participantJoined", handleParticipantJoined);
+
     socket.on("userPositionUpdated", handlePositionUpdate);
     socket.on("userMoved", handlePositionUpdate);
+    socket.on("positionUpdated", handlePositionUpdate);
 
-    socket.on("userDisconnected", removeUser);
-    socket.on("userLeft", removeUser);
-    socket.on("participantLeft", removeUser);
+    socket.on("userDisconnected", handleParticipantLeft);
+    socket.on("userLeft", handleParticipantLeft);
+    socket.on("participantLeft", handleParticipantLeft);
+
     socket.on("error:validation", handleValidationError);
 
     window.addEventListener("offline", handleOffline);
@@ -319,28 +345,37 @@ function App() {
       socket.off("disconnect", handleDisconnect);
       socket.off("connect_error", handleConnectError);
 
-      socket.off("currentUsers", handleUsersSnapshot);
-      socket.off("roomParticipants", handleUsersSnapshot);
-      socket.off("userJoined", upsertUser);
-      socket.off("participantJoined", upsertUser);
+      socket.off("currentUsers", handleParticipantsSnapshot);
+      socket.off("roomParticipants", handleParticipantsSnapshot);
+      socket.off("participantsSnapshot", handleParticipantsSnapshot);
+
+      socket.off("userJoined", handleParticipantJoined);
+      socket.off("participantJoined", handleParticipantJoined);
+
       socket.off("userPositionUpdated", handlePositionUpdate);
       socket.off("userMoved", handlePositionUpdate);
+      socket.off("positionUpdated", handlePositionUpdate);
 
-      socket.off("userDisconnected", removeUser);
-      socket.off("userLeft", removeUser);
-      socket.off("participantLeft", removeUser);
+      socket.off("userDisconnected", handleParticipantLeft);
+      socket.off("userLeft", handleParticipantLeft);
+      socket.off("participantLeft", handleParticipantLeft);
+
       socket.off("error:validation", handleValidationError);
 
       window.removeEventListener("offline", handleOffline);
       window.removeEventListener("online", handleOnline);
 
       socket.disconnect();
-      if (socketRef.current === socket) socketRef.current = null;
+
+      if (socketRef.current === socket) {
+        socketRef.current = null;
+      }
     };
   }, [started, username]);
 
   useEffect(() => {
     const socket = socketRef.current;
+
     if (!started || socketStatus !== "connected" || !socket?.connected) {
       return;
     }
@@ -470,6 +505,7 @@ function Home({
                   ? "Connected"
                   : "Disconnected"}
             </strong>
+
             {apiStatus === "disconnected" && (
               <button
                 className="api-retry"
@@ -568,13 +604,19 @@ function VirtualOffice({
         event.ctrlKey ||
         event.metaKey ||
         event.target?.closest("button, input, textarea, select")
-      ) return;
+      ) {
+        return;
+      }
 
       const moves = {
-        arrowup: [0, -3], w: [0, -3],
-        arrowdown: [0, 3], s: [0, 3],
-        arrowleft: [-3, 0], a: [-3, 0],
-        arrowright: [3, 0], d: [3, 0],
+        arrowup: [0, -3],
+        w: [0, -3],
+        arrowdown: [0, 3],
+        s: [0, 3],
+        arrowleft: [-3, 0],
+        a: [-3, 0],
+        arrowright: [3, 0],
+        d: [3, 0],
       };
 
       const move = moves[event.key.toLowerCase()];
@@ -790,7 +832,7 @@ function ParticipantsPanel({ participants }) {
                 {participant.username}
                 {participant.isYou && <small>You</small>}
               </span>
-              <span className={`participant-status ${participant.isYou ? "online" : "online"}`}>
+              <span className="participant-status online">
                 <i /> Online
               </span>
             </li>
