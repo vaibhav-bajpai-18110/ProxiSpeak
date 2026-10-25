@@ -51,6 +51,7 @@
       height: 8px;
       border-radius: 50%;
       background: #ef4444;
+      transition: background 0.3s;
     }
     .status-dot.connected {
       background: #10b981;
@@ -79,6 +80,7 @@
       display: flex;
       align-items: center;
       gap: 1.25rem;
+      flex-wrap: wrap;
     }
     .hud-item {
       display: flex;
@@ -91,6 +93,21 @@
     .hud-val {
       font-weight: 600;
       color: #f1f5f9;
+    }
+    .username-input {
+      background: #0f172a;
+      color: #f8fafc;
+      border: 1px solid #475569;
+      padding: 0.35rem 0.65rem;
+      border-radius: 6px;
+      font-weight: 600;
+      font-size: 0.85rem;
+      outline: none;
+      width: 130px;
+      transition: border-color 0.2s;
+    }
+    .username-input:focus {
+      border-color: #38bdf8;
     }
     .room-select {
       background: #0f172a;
@@ -188,7 +205,7 @@
       border-radius: 0.75rem;
       padding: 0.75rem 1rem;
       font-size: 0.8rem;
-      max-height: 160px;
+      max-height: 180px;
       overflow-y: auto;
       font-family: monospace;
       flex-grow: 1;
@@ -211,7 +228,7 @@
     <div>
       <h1>ProxiSpeak — Rooms & Spatial Movement</h1>
       <p style="color: #94a3b8; font-size: 0.85rem; margin-top: 2px;">
-        Room/join logic & participant updates for voice communication
+        Multi-tab avatar synchronization, room transitions & instant disconnect handling
       </p>
     </div>
     <div class="status-badge">
@@ -223,6 +240,10 @@
   <div class="main-container">
     <div class="hud-bar">
       <div class="hud-group">
+        <div class="hud-item">
+          <span class="hud-label">Name:</span>
+          <input id="usernameInput" class="username-input" type="text" placeholder="Your name" maxlength="20" />
+        </div>
         <div class="hud-item">
           <span class="hud-label">Room:</span>
           <select id="roomSelect" class="room-select">
@@ -243,7 +264,7 @@
           <span id="hudMyId" class="hud-val">—</span>
         </div>
         <div class="hud-item">
-          <span class="hud-label">Room Participants:</span>
+          <span class="hud-label">Room Members:</span>
           <span id="hudRoomCount" class="hud-val">1</span>
         </div>
       </div>
@@ -261,7 +282,7 @@
         <div class="panel-card">
           <div class="panel-title">
             <span>Room Members</span>
-            <span id="memberCountBadge" style="color: #38bdf8; font-size: 0.8rem;">1</span>
+            <span id="memberCountBadge" style="color: #38bdf8; font-size: 0.8rem;">1 online</span>
           </div>
           <div class="participant-list" id="participantList">
             <!-- Dynamic participant badges rendered here -->
@@ -287,6 +308,7 @@
     const memberCountBadge = document.getElementById("memberCountBadge");
     const participantList = document.getElementById("participantList");
     const roomSelect = document.getElementById("roomSelect");
+    const usernameInput = document.getElementById("usernameInput");
     const eventLog = document.getElementById("eventLog");
 
     function logEvent(msg, highlight = false) {
@@ -315,12 +337,36 @@
       statusText.textContent = "Connected";
       hudMyId.textContent = myId.slice(0, 8);
       logEvent(`Connected to Socket.IO server (ID: ${myId})`, true);
+
+      // Re-join active room with current name upon initial connect or reconnect
+      const currentName = usernameInput.value.trim();
+      if (currentName) {
+        socket.emit("join", { username: currentName, roomId: currentRoomId });
+      } else {
+        socket.emit("joinRoom", { roomId: currentRoomId });
+      }
     });
 
-    socket.on("disconnect", () => {
+    socket.on("connectionAck", (ack) => {
+      if (ack && ack.user) {
+        myUser.color = ack.user.color || myUser.color;
+        if (!usernameInput.value.trim()) {
+          usernameInput.value = ack.user.username;
+          myUser.username = ack.user.username;
+        }
+      }
+    });
+
+    socket.on("disconnect", (reason) => {
       statusDot.classList.remove("connected");
       statusText.textContent = "Disconnected";
-      logEvent("Disconnected from server", false);
+      logEvent(`Disconnected from server (${reason})`, false);
+    });
+
+    socket.on("connect_error", (err) => {
+      statusDot.classList.remove("connected");
+      statusText.textContent = "Reconnecting...";
+      logEvent(`Connection error: ${err.message}`, false);
     });
 
     // Room Participants List Sync
@@ -328,11 +374,12 @@
       currentRoomId = data.roomId;
       roomSelect.value = currentRoomId;
       roomParticipantsMap.clear();
+      otherUsers.clear(); // Always purge previous room avatars to prevent ghost bleed
 
       data.participants.forEach((p) => {
         roomParticipantsMap.set(p.id, p);
         if (p.id === myId) {
-          myUser = { ...myUser, ...p, username: "You" };
+          myUser = { ...myUser, ...p, username: usernameInput.value || myUser.username || "You" };
         } else {
           otherUsers.set(p.id, p);
         }
@@ -343,49 +390,81 @@
     });
 
     // Participant joined room
-    socket.on("participantJoined", (user) => {
-      if (user.id !== myId) {
-        roomParticipantsMap.set(user.id, user);
-        otherUsers.set(user.id, user);
-        renderParticipantsList();
-        logEvent(`Participant joined room: ${user.username} (${user.id.slice(0, 5)})`);
+    function handleParticipantJoined(user) {
+      if (!user || user.id === myId) return;
+      if (user.roomId && user.roomId !== currentRoomId) return;
+
+      roomParticipantsMap.set(user.id, user);
+      otherUsers.set(user.id, user);
+      renderParticipantsList();
+      logEvent(`Participant joined room: ${user.username} (${user.id.slice(0, 5)})`, true);
+    }
+
+    socket.on("participantJoined", handleParticipantJoined);
+    socket.on("userJoined", (user) => {
+      if (user && user.roomId === currentRoomId && user.id !== myId) {
+        handleParticipantJoined(user);
       }
     });
 
-    // Participant left room
-    socket.on("participantLeft", (data) => {
-      if (roomParticipantsMap.has(data.id)) {
-        const u = roomParticipantsMap.get(data.id);
-        roomParticipantsMap.delete(data.id);
-        otherUsers.delete(data.id);
+    // Participant left room or disconnected
+    function handleParticipantLeft(data) {
+      const leftId = data && data.id ? data.id : data;
+      if (roomParticipantsMap.has(leftId)) {
+        const u = roomParticipantsMap.get(leftId);
+        roomParticipantsMap.delete(leftId);
+        otherUsers.delete(leftId);
         renderParticipantsList();
-        logEvent(`Participant left room: ${u?.username || data.id.slice(0, 5)}`);
+        logEvent(`Participant left: ${u?.username || (typeof leftId === 'string' ? leftId.slice(0, 5) : 'User')}`);
       }
-    });
+    }
 
-    // Global position update
-    socket.on("userPositionUpdated", (data) => {
+    socket.on("participantLeft", handleParticipantLeft);
+    socket.on("userLeft", handleParticipantLeft);
+    socket.on("userDisconnected", handleParticipantLeft);
+
+    // Real-Time Position Synchronization
+    function handlePositionUpdate(data) {
+      if (!data || data.id === myId) return;
+
+      // Filter out updates from different rooms
+      if (data.roomId && data.roomId !== currentRoomId) {
+        if (otherUsers.has(data.id)) {
+          otherUsers.delete(data.id);
+          roomParticipantsMap.delete(data.id);
+          renderParticipantsList();
+        }
+        return;
+      }
+
       if (otherUsers.has(data.id)) {
         const u = otherUsers.get(data.id);
         u.x = data.x;
         u.y = data.y;
+        if (data.username) u.username = data.username;
+        if (data.color) u.color = data.color;
         otherUsers.set(data.id, u);
-      } else if (data.id !== myId) {
-        otherUsers.set(data.id, {
+      } else {
+        const newUser = {
           id: data.id,
           username: data.username || `User-${data.id.slice(0, 4)}`,
+          roomId: data.roomId || currentRoomId,
           x: data.x,
           y: data.y,
-          color: "#10B981"
-        });
+          color: data.color || "#10B981",
+        };
+        otherUsers.set(data.id, newUser);
+        roomParticipantsMap.set(data.id, newUser);
+        renderParticipantsList();
       }
-    });
+    }
 
-    socket.on("userDisconnected", (data) => {
-      const leftId = data && data.id ? data.id : data;
-      roomParticipantsMap.delete(leftId);
-      otherUsers.delete(leftId);
-      renderParticipantsList();
+    socket.on("userPositionUpdated", handlePositionUpdate);
+    socket.on("userMoved", handlePositionUpdate);
+
+    // Validation & Error Reporting
+    socket.on("error:validation", (err) => {
+      logEvent(`⚠️ Validation Error: ${err?.message || 'Invalid payload'}`, true);
     });
 
     function renderParticipantsList() {
@@ -395,11 +474,12 @@
       memberCountBadge.textContent = `${total} online`;
 
       // Render myself first
+      const myDisplayName = usernameInput.value.trim() || myUser.username || "You";
       const myBadge = document.createElement("div");
       myBadge.className = "participant-badge";
       myBadge.innerHTML = `
         <div class="avatar-dot" style="background: ${myUser.color}"></div>
-        <span style="font-weight: 600; color: #f8fafc;">You (${myId ? myId.slice(0, 5) : ""})</span>
+        <span style="font-weight: 600; color: #f8fafc;">${myDisplayName} (${myId ? myId.slice(0, 5) : ""})</span>
         <span style="margin-left: auto; font-size: 0.75rem; color: #10b981;">Self</span>
       `;
       participantList.appendChild(myBadge);
@@ -419,11 +499,28 @@
       });
     }
 
+    // Name change listener
+    usernameInput.addEventListener("change", (e) => {
+      const newName = e.target.value.trim();
+      if (newName) {
+        myUser.username = newName;
+        socket.emit("join", { username: newName, roomId: currentRoomId });
+        logEvent(`Updated your name to "${newName}"`, true);
+        renderParticipantsList();
+      }
+    });
+
+    usernameInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        usernameInput.blur();
+      }
+    });
+
     // Room Switcher Change Listener
     roomSelect.addEventListener("change", (e) => {
       const targetRoom = e.target.value;
       logEvent(`Switching to room: ${targetRoom}...`);
-      socket.emit("joinRoom", { roomId: targetRoom });
+      socket.emit("joinRoom", { roomId: targetRoom, username: usernameInput.value.trim() });
     });
 
     // Emit position change
@@ -441,10 +538,13 @@
 
     // Keyboard handlers
     window.addEventListener("keydown", (e) => {
+      // Ignore movement shortcuts when typing into the name input
+      if (document.activeElement === usernameInput) return;
       keysDown[e.key] = true;
     });
 
     window.addEventListener("keyup", (e) => {
+      if (document.activeElement === usernameInput) return;
       keysDown[e.key] = false;
     });
 
@@ -460,6 +560,8 @@
     });
 
     function handleInput() {
+      if (document.activeElement === usernameInput) return;
+
       let moved = false;
       if (keysDown["ArrowUp"] || keysDown["w"] || keysDown["W"]) {
         myUser.y = Math.max(20, myUser.y - MOVE_SPEED);
@@ -538,13 +640,14 @@
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       drawGrid();
 
-      // Draw other users
+      // Draw other users in the current room
       otherUsers.forEach((u) => {
         drawAvatar(u.x, u.y, u.color || "#10B981", u.username || u.id.slice(0, 5), false);
       });
 
       // Draw my avatar
-      drawAvatar(myUser.x, myUser.y, myUser.color || "#3B82F6", "You", true);
+      const myDisplayName = usernameInput.value.trim() || myUser.username || "You";
+      drawAvatar(myUser.x, myUser.y, myUser.color || "#3B82F6", `${myDisplayName} (You)`, true);
     }
 
     function gameLoop() {

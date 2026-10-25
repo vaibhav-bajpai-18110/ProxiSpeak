@@ -97,6 +97,7 @@
 .sofa::before,.sofa::after { content:""; position:absolute; bottom:0; width:10px; height:26px; border-radius:5px; background:#8c7e8d; }.sofa::before { left:-4px; }.sofa::after { right:-4px; }.sofa span { position:absolute; top:10px; bottom:6px; width:48%; border-radius:5px; background:#918392; }.sofa span:first-child { left:4px; }.sofa span:nth-child(2) { right:4px; }.sofa i { position:absolute; left:50%; top:11px; bottom:6px; border-left:2px solid #75697b; }
 .rug { position:absolute; left:37%; top:36%; width:29%; height:43%; z-index:-1; border-radius:50%; background:#9d85761c; border:1px solid #cbb69b26; }
 .office-mate,.my-avatar-wrap { position:absolute; z-index:3; display:flex; align-items:center; flex-direction:column; transform:translate(-50%,-50%); pointer-events:none; }
+.office-mate { transition:left .14s ease-out,top .14s ease-out; }
 .mate-one { left:70%; top:40%; }.mate-two { left:40%; top:75%; }.mate-three { left:22%; top:72%; }
 .mate-avatar { position:relative; display:grid; place-items:center; width:33px; height:35px; color:#fff; border-radius:48% 48% 43% 43%; border:2px solid #f1d9bf; font-weight:700; font-size:12px; box-shadow:0 3px 12px #0005; }.mate-m { background:linear-gradient(145deg,#d5a58b,#956d68); }.mate-a { background:linear-gradient(145deg,#94b6a2,#547f79); }.mate-j { background:linear-gradient(145deg,#d2aa78,#90724b); }
 .mate-status { position:absolute; top:-16px; padding:3px 6px; color:#ded8e2; white-space:nowrap; background:#25242cdd; border:1px solid #ffffff18; border-radius:8px; font-size:7px; }
