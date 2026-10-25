@@ -45,9 +45,9 @@ function clamp(val, min, max) {
 
 function sanitizeUsername(input, defaultName) {
   if (typeof input !== "string") return defaultName;
-  const trimmed = input.trim();
-  if (trimmed.length === 0) return defaultName;
-  return trimmed.slice(0, 30);
+  const clean = input.replace(/[<>'"&]/g, "").trim();
+  if (clean.length === 0) return defaultName;
+  return clean.slice(0, 30);
 }
 
 function sanitizeRoomId(roomId) {
@@ -67,6 +67,113 @@ function getRoomParticipants(roomId) {
     }
   }
   return participants;
+}
+
+/**
+ * Internal logic for joining or switching rooms
+ */
+function executeRoomJoin(socket, targetRoomId, newUsername) {
+  const user = users.get(socket.id);
+  if (!user) return;
+
+  const targetRoom = sanitizeRoomId(targetRoomId || DEFAULT_ROOM);
+  const oldRoom = user.roomId;
+  const targetUsername = newUsername ? sanitizeUsername(newUsername, user.username) : user.username;
+
+  // Duplicate Join Guard: Idempotent if already in target room with identical username
+  if (oldRoom === targetRoom && user.username === targetUsername) {
+    socket.emit("roomParticipants", {
+      roomId: targetRoom,
+      participants: getRoomParticipants(targetRoom),
+    });
+    return;
+  }
+
+  // Same room, username change only
+  if (oldRoom === targetRoom) {
+    user.username = targetUsername;
+    users.set(socket.id, user);
+    socket.to(targetRoom).emit("participantJoined", user);
+    socket.broadcast.emit("userJoined", user);
+    socket.emit("roomParticipants", {
+      roomId: targetRoom,
+      participants: getRoomParticipants(targetRoom),
+    });
+    return;
+  }
+
+  // Room Switch: Leave old room and announce departure
+  socket.leave(oldRoom);
+  socket.to(oldRoom).emit("participantLeft", {
+    id: socket.id,
+    username: user.username,
+    roomId: oldRoom,
+  });
+
+  // Join new room
+  socket.join(targetRoom);
+  user.roomId = targetRoom;
+  user.username = targetUsername;
+  users.set(socket.id, user);
+
+  console.log(`[ROOM SWITCH] User ${socket.id} moved from ${oldRoom} to ${targetRoom}`);
+
+  socket.emit("roomParticipants", {
+    roomId: targetRoom,
+    participants: getRoomParticipants(targetRoom),
+  });
+
+  socket.to(targetRoom).emit("participantJoined", user);
+  socket.broadcast.emit("userJoined", user);
+}
+
+/**
+ * Internal logic for updating avatar position
+ */
+function handleUpdatePosition(socket, positionData) {
+  try {
+    if (!positionData || typeof positionData !== "object" || Array.isArray(positionData)) {
+      socket.emit("error:validation", { message: "Position payload must be an object" });
+      return;
+    }
+
+    if (!isFiniteNumber(positionData.x) || !isFiniteNumber(positionData.y)) {
+      socket.emit("error:validation", {
+        message: "Coordinates x and y must be finite numbers",
+        received: { x: positionData.x, y: positionData.y },
+      });
+      return;
+    }
+
+    const currentUser = users.get(socket.id);
+    if (!currentUser) {
+      socket.emit("error:validation", { message: "User not found in active session" });
+      return;
+    }
+
+    const boundedX = clamp(positionData.x, MAP_BOUNDS.MIN_X, MAP_BOUNDS.MAX_X);
+    const boundedY = clamp(positionData.y, MAP_BOUNDS.MIN_Y, MAP_BOUNDS.MAX_Y);
+
+    currentUser.x = boundedX;
+    currentUser.y = boundedY;
+    users.set(socket.id, currentUser);
+
+    const updatePayload = {
+      id: socket.id,
+      username: currentUser.username,
+      roomId: currentUser.roomId,
+      x: boundedX,
+      y: boundedY,
+      color: currentUser.color,
+    };
+
+    // Broadcast position update to peers without echo back to sender
+    socket.broadcast.emit("userPositionUpdated", updatePayload);
+    socket.broadcast.emit("userMoved", updatePayload);
+  } catch (err) {
+    console.error(`[UPDATE POSITION ERROR] ${socket.id}:`, err.message);
+    socket.emit("error:validation", { message: "Internal error processing position" });
+  }
 }
 
 function registerSocketHandlers(io, socket) {
@@ -115,55 +222,13 @@ function registerSocketHandlers(io, socket) {
   // 4. Room Join / Switch Handler with Duplicate Join Protection
   socket.on("joinRoom", (data = {}) => {
     try {
-      const user = users.get(socket.id);
-      if (!user) return;
-
-      const targetRoom = sanitizeRoomId(data.roomId || DEFAULT_ROOM);
-      const oldRoom = user.roomId;
-      const targetUsername = data.username ? sanitizeUsername(data.username, user.username) : user.username;
-
-      // Duplicate Join Guard
-      if (oldRoom === targetRoom && user.username === targetUsername) {
-        socket.emit("roomParticipants", {
-          roomId: targetRoom,
-          participants: getRoomParticipants(targetRoom),
-        });
-        return;
+      if (data && typeof data === "object") {
+        executeRoomJoin(socket, data.roomId, data.username);
+      } else if (typeof data === "string") {
+        executeRoomJoin(socket, data, null);
+      } else {
+        socket.emit("error:validation", { message: "Invalid joinRoom payload" });
       }
-
-      if (oldRoom === targetRoom) {
-        user.username = targetUsername;
-        users.set(socket.id, user);
-        socket.to(targetRoom).emit("participantJoined", user);
-        socket.broadcast.emit("userJoined", user);
-        socket.emit("roomParticipants", {
-          roomId: targetRoom,
-          participants: getRoomParticipants(targetRoom),
-        });
-        return;
-      }
-
-      // Room Switch
-      socket.leave(oldRoom);
-      socket.to(oldRoom).emit("participantLeft", {
-        id: socket.id,
-        username: user.username,
-        roomId: oldRoom,
-      });
-
-      socket.join(targetRoom);
-      user.roomId = targetRoom;
-      user.username = targetUsername;
-      users.set(socket.id, user);
-
-      console.log(`[ROOM SWITCH] User ${socket.id} moved from ${oldRoom} to ${targetRoom}`);
-
-      socket.emit("roomParticipants", {
-        roomId: targetRoom,
-        participants: getRoomParticipants(targetRoom),
-      });
-
-      socket.to(targetRoom).emit("participantJoined", user);
     } catch (err) {
       console.error(`[JOIN ROOM ERROR] ${socket.id}:`, err.message);
       socket.emit("error:validation", { message: "Failed to join room" });
@@ -172,21 +237,28 @@ function registerSocketHandlers(io, socket) {
 
   // Alias join handler
   socket.on("join", (userData = {}) => {
-    const user = users.get(socket.id) || defaultUser;
-    const targetUsername = userData.username ? sanitizeUsername(userData.username, user.username) : user.username;
+    try {
+      const parsedData = typeof userData === "string" ? { username: userData } : (userData || {});
+      const user = users.get(socket.id) || defaultUser;
+      const targetUsername = parsedData.username ? sanitizeUsername(parsedData.username, user.username) : user.username;
 
-    if (userData.roomId) {
-      socket.emit("joinRoom", { roomId: userData.roomId, username: targetUsername });
-      return;
+      if (parsedData.roomId) {
+        executeRoomJoin(socket, parsedData.roomId, targetUsername);
+        return;
+      }
+
+      if (user.username === targetUsername && users.has(socket.id)) {
+        return;
+      }
+
+      user.username = targetUsername;
+      users.set(socket.id, user);
+      socket.broadcast.emit("userJoined", user);
+      socket.to(user.roomId).emit("participantJoined", user);
+    } catch (err) {
+      console.error(`[JOIN ERROR] ${socket.id}:`, err.message);
+      socket.emit("error:validation", { message: "Failed to process join" });
     }
-
-    if (user.username === targetUsername && users.has(socket.id)) {
-      return;
-    }
-
-    user.username = targetUsername;
-    users.set(socket.id, user);
-    socket.broadcast.emit("userJoined", user);
   });
 
   // 5. Leave Room Handler
@@ -195,7 +267,8 @@ function registerSocketHandlers(io, socket) {
       const user = users.get(socket.id);
       if (!user) return;
 
-      const roomToLeave = sanitizeRoomId(data.roomId || user.roomId);
+      const roomPayload = (data && typeof data === "object") ? data : {};
+      const roomToLeave = sanitizeRoomId(roomPayload.roomId || user.roomId);
 
       if (roomToLeave === DEFAULT_ROOM) {
         return;
@@ -209,6 +282,7 @@ function registerSocketHandlers(io, socket) {
         roomId: roomToLeave,
       });
 
+      // Revert to default room
       socket.join(DEFAULT_ROOM);
       user.roomId = DEFAULT_ROOM;
       users.set(socket.id, user);
@@ -225,7 +299,8 @@ function registerSocketHandlers(io, socket) {
 
   // 6. Get participants for a room
   socket.on("getParticipants", (data = {}, callback) => {
-    const roomId = sanitizeRoomId(data.roomId || DEFAULT_ROOM);
+    const roomPayload = (data && typeof data === "object") ? data : {};
+    const roomId = sanitizeRoomId(roomPayload.roomId || DEFAULT_ROOM);
     const participants = getRoomParticipants(roomId);
     if (typeof callback === "function") {
       callback({ roomId, participants });
@@ -236,55 +311,16 @@ function registerSocketHandlers(io, socket) {
 
   // 7. User Position Updates & Broadcasting
   socket.on("updatePosition", (positionData) => {
-    try {
-      if (!positionData || typeof positionData !== "object" || Array.isArray(positionData)) {
-        socket.emit("error:validation", { message: "Position payload must be an object" });
-        return;
-      }
-
-      if (!isFiniteNumber(positionData.x) || !isFiniteNumber(positionData.y)) {
-        socket.emit("error:validation", {
-          message: "Coordinates x and y must be finite numbers",
-          received: { x: positionData.x, y: positionData.y },
-        });
-        return;
-      }
-
-      const currentUser = users.get(socket.id);
-      if (!currentUser) {
-        socket.emit("error:validation", { message: "User not found in active session" });
-        return;
-      }
-
-      const boundedX = clamp(positionData.x, MAP_BOUNDS.MIN_X, MAP_BOUNDS.MAX_X);
-      const boundedY = clamp(positionData.y, MAP_BOUNDS.MIN_Y, MAP_BOUNDS.MAX_Y);
-
-      currentUser.x = boundedX;
-      currentUser.y = boundedY;
-      users.set(socket.id, currentUser);
-
-      const updatePayload = {
-        id: socket.id,
-        username: currentUser.username,
-        roomId: currentUser.roomId,
-        x: boundedX,
-        y: boundedY,
-      };
-
-      socket.broadcast.emit("userPositionUpdated", updatePayload);
-      socket.broadcast.emit("userMoved", updatePayload);
-    } catch (err) {
-      console.error(`[UPDATE POSITION ERROR] ${socket.id}:`, err.message);
-      socket.emit("error:validation", { message: "Internal error processing position" });
-    }
+    handleUpdatePosition(socket, positionData);
   });
 
+  // Backward-compatible alias for updatePosition
   socket.on("userMoved", (positionData) => {
-    socket.emit("updatePosition", positionData);
+    handleUpdatePosition(socket, positionData);
   });
 
   // 8. WebRTC Signaling Relays with Target Validation
-  socket.on("signal:offer", ({ targetId, offer }) => {
+  socket.on("signal:offer", ({ targetId, offer } = {}) => {
     if (!targetId || !users.has(targetId)) {
       socket.emit("signal:error", { message: "Target peer not found or disconnected", targetId });
       return;
@@ -297,7 +333,7 @@ function registerSocketHandlers(io, socket) {
     }
   });
 
-  socket.on("signal:answer", ({ targetId, answer }) => {
+  socket.on("signal:answer", ({ targetId, answer } = {}) => {
     if (!targetId || !users.has(targetId)) {
       socket.emit("signal:error", { message: "Target peer not found or disconnected", targetId });
       return;
@@ -310,7 +346,7 @@ function registerSocketHandlers(io, socket) {
     }
   });
 
-  socket.on("signal:ice-candidate", ({ targetId, candidate }) => {
+  socket.on("signal:ice-candidate", ({ targetId, candidate } = {}) => {
     if (!targetId || !users.has(targetId)) {
       socket.emit("signal:error", { message: "Target peer not found or disconnected", targetId });
       return;
@@ -339,8 +375,10 @@ function registerSocketHandlers(io, socket) {
     const existingUser = users.get(socket.id);
     console.log(`[SOCKET DISCONNECTING] User ${socket.id} disconnecting. Reason: ${reason}. Active rooms:`, Array.from(socket.rooms));
 
+    const notifiedRooms = new Set();
     for (const room of socket.rooms) {
       if (room !== socket.id) {
+        notifiedRooms.add(room);
         socket.to(room).emit("participantLeft", {
           id: socket.id,
           username: existingUser?.username || `User-${socket.id.slice(0, 4)}`,
@@ -348,6 +386,15 @@ function registerSocketHandlers(io, socket) {
           reason,
         });
       }
+    }
+
+    if (existingUser?.roomId && !notifiedRooms.has(existingUser.roomId)) {
+      socket.to(existingUser.roomId).emit("participantLeft", {
+        id: socket.id,
+        username: existingUser.username,
+        roomId: existingUser.roomId,
+        reason,
+      });
     }
   });
 
