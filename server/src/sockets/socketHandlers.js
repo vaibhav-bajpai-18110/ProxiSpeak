@@ -124,10 +124,11 @@ function registerSocketHandlers(io, socket) {
     const currentUser = users.get(socket.id);
     if (!currentUser) return;
 
-    const targetRoom = sanitizeRoomId(data.roomId || DEFAULT_ROOM);
-    const oldRoom = currentUser.roomId;
+  const targetRoom = sanitizeRoomId(data.roomId || DEFAULT_ROOM);
+  const oldRoom = currentUser.roomId;
+  const previousUsername = currentUser.username;
 
-    if (data.username) {
+  if (data.username) {
       currentUser.username = sanitizeUsername(
         data.username,
         currentUser.username
@@ -155,8 +156,10 @@ function registerSocketHandlers(io, socket) {
       participants: getRoomParticipants(targetRoom),
     });
 
-    if (oldRoom !== targetRoom) {
-      socket.to(targetRoom).emit("participantJoined", currentUser);
+    if (
+    oldRoom !== targetRoom ||
+    previousUsername !== currentUser.username) {
+    socket.to(targetRoom).emit("participantJoined", currentUser);
     }
 
     socket.broadcast.emit("userJoined", currentUser);
@@ -179,6 +182,8 @@ function registerSocketHandlers(io, socket) {
       joinRoom(data);
       return;
     }
+
+
 
     if (data.username) {
       currentUser.username = sanitizeUsername(

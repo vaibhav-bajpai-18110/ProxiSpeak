@@ -8,13 +8,32 @@ const mongoose = require("mongoose");
 require("dotenv").config();
 
 const connectDB = require("./config/db");
-const { registerSocketHandlers } = require("./sockets/socketHandlers");
+const {
+  registerSocketHandlers,
+  getUserCount,
+} = require("./sockets/socketHandlers");
 const databaseService = require("./services/databaseService");
+
+// Process-level error handling
+process.on("unhandledRejection", (err) => {
+  console.error("[UNHANDLED REJECTION]:", err?.message || err);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("[UNCAUGHT EXCEPTION]:", err?.message || err);
+});
 
 const app = express();
 const server = http.createServer(app);
 
-app.use(cors());
+app.use(
+  cors({
+    origin: "*",
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
+
 app.use(express.json());
 
 const io = require("socket.io")(server, {
@@ -22,6 +41,8 @@ const io = require("socket.io")(server, {
     origin: "*",
     methods: ["GET", "POST"],
   },
+  pingTimeout: 10000,
+  pingInterval: 5000,
 });
 
 // Root route
@@ -43,18 +64,24 @@ app.use(
 
 // Health check
 app.get("/api/health", (req, res) => {
+  res.setHeader("Cache-Control", "no-cache");
+
   res.json({
     status: "OK",
     project: "ProxiSpeak",
+    timestamp: new Date().toISOString(),
   });
 });
 
 // Server status
 app.get("/api/status", (req, res) => {
+  res.setHeader("Cache-Control", "no-cache");
+
   res.json({
     status: "active",
     message: "ProxiSpeak server is operational",
     uptime: `${Math.floor(process.uptime())}s`,
+    activeUsers: getUserCount(),
     timestamp: new Date().toISOString(),
   });
 });
@@ -89,7 +116,9 @@ app.post("/api/worlds", async (req, res) => {
     console.error("World creation failed:", error.message);
 
     return res.status(error.statusCode || 500).json({
-      error: error.statusCode ? error.message : "Failed to create world.",
+      error: error.statusCode
+        ? error.message
+        : "Failed to create world.",
     });
   }
 });
@@ -118,13 +147,17 @@ app.get("/api/worlds/:id", async (req, res) => {
     const { id } = req.params;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ error: "Invalid world ID." });
+      return res.status(400).json({
+        error: "Invalid world ID.",
+      });
     }
 
     const result = await databaseService.getWorldWithMembers(id);
 
     if (!result) {
-      return res.status(404).json({ error: "World not found." });
+      return res.status(404).json({
+        error: "World not found.",
+      });
     }
 
     return res.json(result);
@@ -144,14 +177,21 @@ app.post("/api/worlds/:id/join", async (req, res) => {
     const { userId } = req.body;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ error: "Invalid world ID." });
+      return res.status(400).json({
+        error: "Invalid world ID.",
+      });
     }
 
     if (typeof userId !== "string" || !userId.trim()) {
-      return res.status(400).json({ error: "A userId is required." });
+      return res.status(400).json({
+        error: "A userId is required.",
+      });
     }
 
-    const membership = await databaseService.joinWorld(id, userId.trim());
+    const membership = await databaseService.joinWorld(
+      id,
+      userId.trim()
+    );
 
     return res.status(200).json({
       message: "Successfully joined the world.",
@@ -161,18 +201,20 @@ app.post("/api/worlds/:id/join", async (req, res) => {
     console.error("Failed to join world:", error.message);
 
     return res.status(error.statusCode || 500).json({
-      error: error.statusCode ? error.message : "Failed to join world.",
+      error: error.statusCode
+        ? error.message
+        : "Failed to join world.",
     });
   }
 });
 
-// Register Socket.IO handlers
+// Socket.IO connection handler
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
   registerSocketHandlers(io, socket);
 });
 
-// 404 handler for unknown routes
+// 404 handler
 app.use((req, res) => {
   if (req.path.startsWith("/api/")) {
     return res.status(404).json({
@@ -184,7 +226,7 @@ app.use((req, res) => {
   return res.status(404).send("Not Found");
 });
 
-// Global error handler
+// Express error handler
 app.use((err, req, res, next) => {
   console.error("[SERVER ERROR]:", err);
 
