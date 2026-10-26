@@ -26,3 +26,27 @@ Database and documentation tasks completed by Member 3 (Manya).
 4. Verify the database connection and API health endpoint.
 ## Notes
 These results cover the listed test scenarios; they do not guarantee every possible database failure or validation case.
+## Additional Model Validation Tests
+The following in-memory Mongoose validation tests were completed after the original Day 10 verification.
+| Model | Test | Result |
+|---|---|---|
+| CommunicationSession | Valid session with two participants | PASS |
+| CommunicationSession | Reject fewer than two participants | PASS |
+| CommunicationSession | Reject duplicate participants | PASS |
+| CommunicationSession | Reject blank participant IDs | PASS |
+| CommunicationSession | Reject invalid status | PASS |
+| World | Accept valid world | PASS |
+| World | Reject missing name | PASS |
+| World | Reject missing ownerId | PASS |
+| World | Reject whitespace-only name | PASS |
+| World | Apply default layout | PASS |
+| WorldMember | Accept valid membership | PASS |
+| WorldMember | Reject missing userId | PASS |
+| WorldMember | Reject missing worldId | PASS |
+| WorldMember | Reject invalid role | PASS |
+| WorldMember | Apply default member role | PASS |
+All 15 additional model validation cases passed. These tests used in-memory document validation and did not write records to MongoDB.
+### Limitations
+- The additional tests do not verify persistence for World, WorldMember, or CommunicationSession.
+- The WorldMember unique compound index is defined in the schema, but duplicate-key enforcement has not been verified by these tests.
+- Passing schema validation does not establish that referenced users or worlds exist in the database.
