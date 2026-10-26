@@ -47,6 +47,30 @@ The following in-memory Mongoose validation tests were completed after the origi
 | WorldMember | Apply default member role | PASS |
 All 15 additional model validation cases passed. These tests used in-memory document validation and did not write records to MongoDB.
 ### Limitations
-- The additional tests do not verify persistence for World, WorldMember, or CommunicationSession.
-- The WorldMember unique compound index is defined in the schema, but duplicate-key enforcement has not been verified by these tests.
+- The original in-memory validation tests did not verify persistence for World, WorldMember, or CommunicationSession; see the Day 11 results below.
+- The original in-memory validation tests did not verify duplicate-key enforcement; the Day 11 persistence test subsequently verified the unique membership constraint.
 - Passing schema validation does not establish that referenced users or worlds exist in the database.
+## Day 11: Database Persistence Verification
+### Test Results
+| Test | Result |
+|---|---|
+| MongoDB connection | PASS |
+| Test user creation | PASS |
+| World save and retrieval | PASS |
+| WorldMember save and retrieval | PASS |
+| Duplicate membership rejected by MongoDB | PASS |
+| CommunicationSession save and retrieval | PASS |
+| CommunicationSession end update persisted | PASS |
+| Test-record cleanup | PASS |
+### Details
+- The separate `test-model-persistence.js` script verified database persistence for World, WorldMember, and CommunicationSession.
+- Two uniquely identified test users were created for the test.
+- The WorldMember compound unique index rejected a duplicate membership with MongoDB duplicate-key error code 11000.
+- A communication session was saved, retrieved, updated to ended, and retrieved again to verify the persisted update.
+- The script removed the test records it created and reported successful cleanup.
+- All eight reported persistence checks passed.
+### Updated Limitations
+- The tests verify the listed operations only; they do not establish complete application-wide database correctness.
+- The duplicate membership test verified the unique index for the tested user and world combination.
+- These tests do not establish that every referenced user or world exists for all application operations.
+- Test cleanup succeeded for the records tracked by the test script.
