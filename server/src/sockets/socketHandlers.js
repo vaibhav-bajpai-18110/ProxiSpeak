@@ -4,6 +4,13 @@
  * room join/leave logic, participant updates, duplicate event protection, and WebRTC signaling.
  */
 
+const {
+  calculateDistance,
+  calculateAudioVolume,
+  calculateAudioPan,
+  getNearbyParticipants,
+} = require("../services/proximityService");
+
 // In-memory store of active users: socket.id -> { id, username, roomId, x, y, color }
 const users = new Map();
 
@@ -364,7 +371,26 @@ function registerSocketHandlers(io, socket) {
     socket.emit("pong", data || "pong");
   });
 
-  // 10. Voluntary Client Disconnection Request
+  // 10. Spatial Proximity & Nearby Participants Query
+  socket.on("getNearbyUsers", (data = {}, callback) => {
+    try {
+      const user = users.get(socket.id);
+      if (!user) return;
+      const radius = isFiniteNumber(data.radius) ? clamp(data.radius, 10, 2000) : 300;
+      const roomParticipants = getRoomParticipants(user.roomId);
+      const nearby = getNearbyParticipants(user, roomParticipants, radius);
+
+      if (typeof callback === "function") {
+        callback({ roomId: user.roomId, radius, nearby });
+      } else {
+        socket.emit("nearbyUsers", { roomId: user.roomId, radius, nearby });
+      }
+    } catch (err) {
+      console.error(`[PROXIMITY ERROR] ${socket.id}:`, err.message);
+    }
+  });
+
+  // 11. Voluntary Client Disconnection Request
   socket.on("clientDisconnect", () => {
     console.log(`[CLIENT DISCONNECT REQUEST] Client ${socket.id} requested disconnect`);
     socket.disconnect(true);
@@ -444,6 +470,10 @@ module.exports = {
   clamp,
   sanitizeUsername,
   sanitizeRoomId,
+  calculateDistance,
+  calculateAudioVolume,
+  calculateAudioPan,
+  getNearbyParticipants,
   DEFAULT_ROOM,
   MAP_BOUNDS,
 };

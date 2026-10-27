@@ -1,7 +1,7 @@
 # ProxiSpeak Backend Documentation
 
 ## 1. Overview
-The **ProxiSpeak Backend** is an enterprise-grade Node.js and Express server powered by Socket.IO. It serves as the real-time spatial positioning, room management, WebRTC audio signaling, and client state orchestration engine for the ProxiSpeak Geospatial Proximity Audio platform.
+The **ProxiSpeak Backend** is an enterprise-grade Node.js and Express server powered by Socket.IO. It serves as the real-time spatial positioning, room management, WebRTC audio signaling, spatial audio proximity calculation, and client state orchestration engine for the ProxiSpeak Geospatial Proximity Audio platform.
 
 The backend is fully integrated with and verified against both the ProxiSpeak React frontend client (`client/src/App.jsx`) and the interactive multi-tab Canvas test environment (`server/public/index.html`).
 
@@ -13,7 +13,7 @@ The backend is fully integrated with and verified against both the ProxiSpeak Re
 - **WebSocket Engine**: Socket.IO (`^4.8.4`)
 - **Cross-Origin Handling**: CORS (`^2.8.6`)
 - **Environment Management**: `dotenv` (`^18.0.7`)
-- **Automated Verification**: Custom 15-stage end-to-end integration test runner
+- **Automated Verification**: Custom 16-stage end-to-end integration test runner
 
 ---
 
@@ -21,18 +21,18 @@ The backend is fully integrated with and verified against both the ProxiSpeak Re
 ```text
 server/
 ├── public/
-│   └── index.html            # Interactive multi-tab 2D Canvas testing client
+│   └── index.html            # Interactive multi-tab 2D Canvas testing client with proximity indicators
 ├── src/
 │   ├── index.js              # Express app, process safety nets, REST APIs, & HTTP server
 │   ├── sockets/
-│   │   └── socketHandlers.js # Socket.IO lifecycle, validation, room, & movement handlers
+│   │   └── socketHandlers.js # Socket.IO lifecycle, validation, room, proximity, & movement handlers
 │   └── services/
-│       └── proximityService.js # Spatial distance & proximity calculations helper
+│       └── proximityService.js # Spatial distance, audio volume attenuation & stereo pan calculations
 ├── .env                      # Environment configurations (PORT=5000)
 ├── .gitignore                # Git exclusion rules
 ├── package.json              # Package manifest and scripts (start, test)
 ├── test-client.js            # Standalone Socket.IO test client
-├── verify.js                 # Automated 15-stage verification test runner
+├── verify.js                 # Automated 16-stage verification test runner
 └── README.md                 # Complete backend documentation
 ```
 
@@ -63,7 +63,7 @@ PORT=5000
   {
     "status": "OK",
     "project": "ProxiSpeak",
-    "timestamp": "2026-10-25T14:00:00.000Z"
+    "timestamp": "2026-10-27T14:30:00.000Z"
   }
   ```
 - **Status Code**: `200 OK`
@@ -77,14 +77,14 @@ PORT=5000
     "status": "active",
     "message": "ProxiSpeak server is operational",
     "uptime": "120s",
-    "activeUsers": 3,
-    "timestamp": "2026-10-25T14:00:00.000Z"
+    "activeUsers": 4,
+    "timestamp": "2026-10-27T14:30:00.000Z"
   }
   ```
 - **Status Code**: `200 OK`
 
 ### `GET /demo`
-- **Description**: Serves the standalone 2D Canvas interactive visual client with real-time avatar movement, live room switching, and multi-tab testing support.
+- **Description**: Serves the standalone 2D Canvas interactive visual client with real-time avatar movement, live room switching, proximity voice range indicators, and multi-tab testing support.
 - **Status Code**: `200 OK`
 
 ### 404 Route Fallback
@@ -133,6 +133,13 @@ PORT=5000
 | `userPositionUpdated`| Server $\rightarrow$ Clients | `{ id, username, roomId, x, y, color }` | Broadcasts validated avatar position to peers without sender echo. |
 | `userMoved` | Server $\rightarrow$ Clients | `{ id, username, roomId, x, y, color }` | Backward-compatible alias for `userPositionUpdated`. |
 
+### Spatial Proximity & Dynamics (`proximityService`)
+
+| Event Name | Direction | Payload | Description |
+| :--- | :--- | :--- | :--- |
+| `getNearbyUsers` | Client $\rightarrow$ Server | `{ radius? }` (with callback) | Computes and returns participants within audio earshot radius (distance, volume attenuation, stereo pan). |
+| `nearbyUsers` | Server $\rightarrow$ Client | `{ roomId, radius, nearby: [...] }` | Fallback event emitted if `getNearbyUsers` is called without callback. |
+
 ### WebRTC Audio Signaling Relays
 
 | Event Name | Direction | Payload | Description |
@@ -152,26 +159,47 @@ PORT=5000
 
 ---
 
-## 7. Multi-Tab Avatar Movement Synchronization
+## 7. Spatial Audio Proximity Calculations
 
-The backend and Canvas client are designed for multi-tab synchronization:
+ProxiSpeak's proximity service ([`server/src/services/proximityService.js`](src/services/proximityService.js)) implements dynamic audio attenuation:
 
-1. **Independent Client Sessions**:
-   - Each browser tab receives a distinct Socket.IO connection ID, unique initial position, and distinct avatar color.
-   - Users can customize their display name directly via the HUD Name input.
-2. **Real-Time Bidirectional Propagation**:
-   - Movements triggered in Tab 1 via keyboard (<kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / arrows) or clicking the canvas emit `updatePosition`.
-   - The server validates coordinates, clamps them to `[0, 2000]`, and broadcasts `userPositionUpdated` to all other tabs.
-   - Tab 2 receives the update and smoothly moves Tab 1's avatar in real-time.
-3. **No Ghost Avatars on Room Transitions**:
-   - When a user switches rooms, their avatar is automatically purged from the previous room's canvas and member list.
-   - Only peers within the active room are rendered.
-4. **Unexpected Disconnection Recovery**:
-   - When a browser tab is abruptly closed or refreshes, the server detects the transport teardown (`transport close`), clears the user from memory, and immediately informs all other tabs via `userDisconnected` and `participantLeft`.
+1. **Euclidean Distance**:
+   $$\text{distance} = \sqrt{(x_1 - x_2)^2 + (y_1 - y_2)^2}$$
+2. **Audio Volume Rolloff**:
+   $$\text{volume} = \max\left(0, 1 - \frac{\text{distance}}{\text{maxRadius}}\right)$$
+   - At distance 0px: Volume = 1.0 (100%).
+   - At distance 150px (with radius 300): Volume = 0.50 (50%).
+   - At distance $\ge$ 300px: Volume = 0.0 (silent).
+3. **Stereo Panning**:
+   $$\text{pan} = \max\left(-1.0, \min\left(1.0, \frac{\Delta x}{\text{panMaxDistance}}\right)\right)$$
+   - Left of listener: Pan < 0.0.
+   - Centered: Pan = 0.0.
+   - Right of listener: Pan > 0.0.
 
 ---
 
-## 8. Frontend Integration Contract (`client/src/App.jsx`)
+## 8. Multi-Tab Avatar Movement & Interaction
+
+The backend and Canvas client provide real-time multi-tab interaction:
+
+1. **Independent Client Sessions**:
+   - Each browser tab receives a distinct Socket.IO connection ID, unique initial position, and distinct avatar color.
+   - Users customize display names directly via the HUD Name input.
+2. **Real-Time Bidirectional Movement**:
+   - Movements triggered in Tab 1 via keyboard (<kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> / arrows) or clicking the canvas emit `updatePosition`.
+   - The server validates coordinates, clamps them to `[0, 2000]`, and broadcasts `userPositionUpdated` to all other tabs.
+   - Tab 2 receives the update and smoothly moves Tab 1's avatar in real-time.
+3. **Live Proximity Feedback**:
+   - Avatars within 120px are highlighted with a `🎙️ In Voice Range` indicator in the member list.
+4. **No Ghost Avatars on Room Transitions**:
+   - When a user switches rooms, their avatar is automatically purged from the previous room's canvas and member list.
+   - Only peers within the active room are rendered.
+5. **Unexpected Disconnection Recovery**:
+   - When a browser tab is abruptly closed or refreshes, the server detects transport teardown (`transport close`), clears the user from memory, and immediately informs all other tabs via `userDisconnected` and `participantLeft`.
+
+---
+
+## 9. Frontend Integration Contract (`client/src/App.jsx`)
 
 The backend is engineered to seamlessly communicate with the React frontend:
 
@@ -201,7 +229,7 @@ The backend is engineered to seamlessly communicate with the React frontend:
 
 ---
 
-## 9. How to Run Locally
+## 10. How to Run Locally
 
 ### Start Development Server
 ```bash
@@ -210,12 +238,12 @@ npm start
 ```
 Starts Express & Socket.IO server on `http://localhost:5000`.
 
-### Run Automated 15-Module Verification Suite
+### Run Automated 16-Module Verification Suite
 ```bash
 cd server
 npm test
 ```
-Executes all 15 automated integration tests:
+Executes all 16 automated integration tests:
 1. `GET /` (Root route)
 2. `GET /api/health` (Frontend health contract)
 3. `GET /api/status` (Active users and uptime)
@@ -231,10 +259,11 @@ Executes all 15 automated integration tests:
 13. Real-time multi-tab avatar movement synchronization (Alice, Bob, Charlie)
 14. Unexpected disconnections & abrupt transport teardown handling
 15. Exhaustive invalid inputs battery & crash resistance
+16. **Simultaneous Multi-User Virtual Office Interaction & Spatial Proximity Calculations**
 
 ### Interactive Multi-Tab Visual Demo
 1. Start server: `npm start`
 2. Open [http://localhost:5000/demo](http://localhost:5000/demo) in **two or three separate browser tabs**.
 3. Name Tab 1 "Alice" and Tab 2 "Bob".
-4. Move either avatar using keyboard or mouse; watch real-time coordinates, avatar position, and room member lists sync instantaneously!
+4. Move either avatar using keyboard or mouse; watch real-time coordinates, avatar position, proximity voice range badges (`🎙️ Audible`), and room member lists sync instantaneously!
 5. Close Tab 1; observe Tab 2 immediately logging the disconnect and clearing Alice from the screen.

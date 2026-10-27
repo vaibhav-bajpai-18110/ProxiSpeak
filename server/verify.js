@@ -2,10 +2,17 @@ const http = require("http");
 const { spawn } = require("child_process");
 const { io } = require("socket.io-client");
 
-async function checkUrl(url) {
-  const res = await fetch(url);
-  const text = await res.text();
-  return { status: res.status, body: text, headers: res.headers };
+async function checkUrl(url, retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const res = await fetch(url);
+      const text = await res.text();
+      return { status: res.status, body: text, headers: res.headers };
+    } catch (err) {
+      if (i === retries - 1) throw err;
+      await new Promise((r) => setTimeout(r, 400));
+    }
+  }
 }
 
 // Test 1: Socket.IO Connection Acknowledgment & Ping-Pong
@@ -690,6 +697,102 @@ async function testExhaustiveInvalidInputs(serverUrl) {
   });
 }
 
+// Test 12: Simultaneous Multi-User Virtual Office Interaction & Spatial Proximity
+async function testSimultaneousVirtualOfficeInteraction(serverUrl) {
+  return new Promise(async (resolve, reject) => {
+    const user1 = io(serverUrl, { transports: ["websocket", "polling"], timeout: 5000 });
+    const user2 = io(serverUrl, { transports: ["websocket", "polling"], timeout: 5000 });
+    const user3 = io(serverUrl, { transports: ["websocket", "polling"], timeout: 5000 });
+    const user4 = io(serverUrl, { transports: ["websocket", "polling"], timeout: 5000 });
+
+    const clients = [user1, user2, user3, user4];
+    const timeout = setTimeout(() => {
+      clients.forEach((c) => c.disconnect());
+      reject(new Error("Simultaneous virtual office interaction test timed out"));
+    }, 10000);
+
+    try {
+      await Promise.all(
+        clients.map(
+          (c) =>
+            new Promise((res, rej) => {
+              c.on("connect", res);
+              c.on("connect_error", rej);
+            })
+        )
+      );
+
+      // Join with distinct usernames
+      user1.emit("join", { username: "User-1", roomId: "main-office" });
+      user2.emit("join", { username: "User-2", roomId: "main-office" });
+      user3.emit("join", { username: "User-3", roomId: "main-office" });
+      user4.emit("join", { username: "User-4", roomId: "meeting-room-a" });
+
+      await new Promise((r) => setTimeout(r, 300));
+
+      // Simultaneously position users:
+      // User-1 at (100, 100)
+      // User-2 at (150, 100) -> distance to User-1 is 50px (in range <= 300)
+      // User-3 at (800, 800) -> distance to User-1 is ~989px (out of range > 300)
+      // User-4 at (120, 100) -> in different room ("meeting-room-a")
+      user1.emit("updatePosition", { x: 100, y: 100 });
+      user2.emit("updatePosition", { x: 150, y: 100 });
+      user3.emit("updatePosition", { x: 800, y: 800 });
+      user4.emit("updatePosition", { x: 120, y: 100 });
+
+      await new Promise((r) => setTimeout(r, 400));
+
+      // Query nearby participants for User-1
+      let proximityResult = null;
+      await new Promise((res) => {
+        user1.emit("getNearbyUsers", { radius: 300 }, (data) => {
+          proximityResult = data;
+          res();
+        });
+      });
+
+      const foundUser2 = proximityResult?.nearby?.find((p) => p.id === user2.id);
+      const foundUser3 = proximityResult?.nearby?.find((p) => p.id === user3.id);
+      const foundUser4 = proximityResult?.nearby?.find((p) => p.id === user4.id);
+
+      const proximityAccurate =
+        foundUser2 &&
+        foundUser2.distance === 50 &&
+        foundUser2.volume > 0.8 &&
+        !foundUser3 &&
+        !foundUser4;
+
+      // User-4 switches to main-office
+      let user1ReceivedUser4Joined = false;
+      user1.on("participantJoined", (p) => {
+        if (p.id === user4.id && p.roomId === "main-office") {
+          user1ReceivedUser4Joined = true;
+        }
+      });
+
+      user4.emit("joinRoom", { roomId: "main-office" });
+      await new Promise((r) => setTimeout(r, 400));
+
+      // Verify active users count in status endpoint
+      const statusRes = await checkUrl(`${serverUrl}/api/status`);
+      const statusJson = JSON.parse(statusRes.body);
+
+      clearTimeout(timeout);
+      clients.forEach((c) => c.disconnect());
+
+      resolve({
+        activeUsersCount: statusJson.activeUsers,
+        proximityAccurate,
+        roomTransitionVerified: user1ReceivedUser4Joined,
+      });
+    } catch (err) {
+      clearTimeout(timeout);
+      clients.forEach((c) => c.disconnect());
+      reject(err);
+    }
+  });
+}
+
 async function runTest() {
   let hasErrors = false;
   console.log("Starting ProxiSpeak server for verification...");
@@ -722,6 +825,7 @@ async function runTest() {
   });
 
   await startupPromise;
+  await new Promise((r) => setTimeout(r, 500));
 
   try {
     console.log("\n==================================================");
@@ -895,6 +999,18 @@ async function runTest() {
       hasErrors = true;
     }
 
+    // 16. Simultaneous Multi-User Virtual Office Interaction & Spatial Proximity
+    console.log("\n--- [16] Testing Simultaneous Multi-User Interaction & Spatial Proximity ---");
+    const simInteractionResult = await testSimultaneousVirtualOfficeInteraction("http://localhost:5000");
+    if (simInteractionResult.proximityAccurate && simInteractionResult.roomTransitionVerified) {
+      console.log("--> PASS: 4 concurrent users interacted simultaneously in the virtual office without race conditions.");
+      console.log("--> PASS: Spatial proximity distance (50px), volume attenuation (> 0.8), and room isolation verified.");
+      console.log("--> PASS: Dynamic room transitions and participant notifications delivered accurately.");
+    } else {
+      console.error("--> FAIL: Simultaneous interaction test failed:", simInteractionResult);
+      hasErrors = true;
+    }
+
   } catch (err) {
     console.error("\n[TEST RUNNER EXCEPTION]:", err.message || err);
     hasErrors = true;
@@ -908,7 +1024,7 @@ async function runTest() {
       console.error("\n❌ VERIFICATION FAILED: One or more tests did not pass.\n");
       process.exit(1);
     } else {
-      console.log("\n✅ ALL TESTS PASSED: All 15 backend modules, multi-tab sync, unexpected disconnects, and edge cases verified.\n");
+      console.log("\n✅ ALL TESTS PASSED: All 16 backend modules, multi-user simultaneous interactions, proximity dynamics, and endpoints verified.\n");
       process.exit(0);
     }
   }

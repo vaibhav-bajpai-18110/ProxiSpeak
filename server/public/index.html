@@ -484,15 +484,19 @@
       `;
       participantList.appendChild(myBadge);
 
-      // Render other participants in room
+      // Render other participants in room with proximity indicators
       roomParticipantsMap.forEach((p) => {
         if (p.id !== myId) {
+          const dist = Math.round(Math.hypot(myUser.x - p.x, myUser.y - p.y));
+          const inRange = dist <= 120;
           const badge = document.createElement("div");
           badge.className = "participant-badge";
           badge.innerHTML = `
             <div class="avatar-dot" style="background: ${p.color || '#10B981'}"></div>
             <span>${p.username || p.id.slice(0, 6)}</span>
-            <span style="margin-left: auto; font-size: 0.75rem; color: #94a3b8;">(${Math.round(p.x)}, ${Math.round(p.y)})</span>
+            <span style="margin-left: auto; font-size: 0.72rem; padding: 2px 6px; border-radius: 4px; ${inRange ? 'background: rgba(16, 185, 129, 0.2); color: #34d399; font-weight: 600;' : 'background: rgba(148, 163, 184, 0.1); color: #94a3b8;'}">
+              ${inRange ? '🎙️ ' + dist + 'px (Audible)' : dist + 'px'}
+            </span>
           `;
           participantList.appendChild(badge);
         }
@@ -530,6 +534,7 @@
         y: Math.round(myUser.y),
       });
       updateHud();
+      renderParticipantsList();
     }
 
     function updateHud() {
