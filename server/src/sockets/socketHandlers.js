@@ -12,6 +12,122 @@ const {
 const users = new Map();
 const activeSessions = new Map();
 
+// WebRTC call state
+const activeAudioCalls = new Map();
+const userCallMap = new Map();
+
+function registerCall(callerId, calleeId) {
+  const callId = `call_${callerId}_${calleeId}_${Date.now()}`;
+  const callRecord = {
+    callId,
+    callerId,
+    calleeId,
+    startedAt: Date.now(),
+    status: "active",
+  };
+
+  activeAudioCalls.set(callId, callRecord);
+
+  if (!userCallMap.has(callerId)) userCallMap.set(callerId, new Set());
+  if (!userCallMap.has(calleeId)) userCallMap.set(calleeId, new Set());
+
+  userCallMap.get(callerId).add(callId);
+  userCallMap.get(calleeId).add(callId);
+
+  return callRecord;
+}
+
+function endCallBetween(userA, userB) {
+  const callsToTerminate = [];
+
+  for (const [callId, call] of activeAudioCalls.entries()) {
+    if (
+      (call.callerId === userA && call.calleeId === userB) ||
+      (call.callerId === userB && call.calleeId === userA)
+    ) {
+      callsToTerminate.push(callId);
+    }
+  }
+
+  for (const callId of callsToTerminate) {
+    const call = activeAudioCalls.get(callId);
+    if (!call) continue;
+
+    userCallMap.get(call.callerId)?.delete(callId);
+    userCallMap.get(call.calleeId)?.delete(callId);
+    activeAudioCalls.delete(callId);
+  }
+
+  return callsToTerminate.length > 0;
+}
+
+function getCallPeers(socketId) {
+  const callIds = userCallMap.get(socketId);
+  if (!callIds || callIds.size === 0) return [];
+
+  const peers = new Set();
+
+  for (const callId of callIds) {
+    const call = activeAudioCalls.get(callId);
+    if (!call) continue;
+
+    if (call.callerId === socketId) peers.add(call.calleeId);
+    else if (call.calleeId === socketId) peers.add(call.callerId);
+  }
+
+  return Array.from(peers);
+}
+
+function cleanupUserCalls(socketId, io, reason = "peer_disconnected") {
+  const callIds = userCallMap.get(socketId);
+  if (!callIds || callIds.size === 0) {
+    userCallMap.delete(socketId);
+    return [];
+  }
+
+  const terminatedPeers = [];
+
+  for (const callId of Array.from(callIds)) {
+    const call = activeAudioCalls.get(callId);
+    if (!call) continue;
+
+    const otherPeerId =
+      call.callerId === socketId ? call.calleeId : call.callerId;
+
+    userCallMap.get(otherPeerId)?.delete(callId);
+    activeAudioCalls.delete(callId);
+
+    if (otherPeerId) {
+      terminatedPeers.push(otherPeerId);
+
+      if (io) {
+        io.to(otherPeerId).emit("signal:call-ended", {
+          peerId: socketId,
+          reason,
+          callId,
+        });
+
+        io.to(otherPeerId).emit("callEnded", {
+          peerId: socketId,
+          reason,
+        });
+      }
+    }
+  }
+
+  userCallMap.delete(socketId);
+  return terminatedPeers;
+}
+
+function getActiveCallsCount() {
+  return activeAudioCalls.size;
+}
+
+function clearActiveCalls() {
+  activeAudioCalls.clear();
+  userCallMap.clear();
+}
+
 const MAP_BOUNDS = {
   MIN_X: 0,
   MAX_X: 2000,
@@ -99,6 +215,7 @@ function registerSocketHandlers(io, socket) {
     x: 300,
     y: 250,
     color: getRandomColor(),
+    isMuted: false,
   };
 
   users.set(socket.id, user);
@@ -264,13 +381,11 @@ function registerSocketHandlers(io, socket) {
       participants: getRoomParticipants(roomId),
     };
 
-    if (typeof callback === "function") {
-      callback(result);
-    } else {
-      socket.emit("roomParticipants", result);
-    }
+    if (typeof callback === "function") callback(result);
+    else socket.emit("roomParticipants", result);
   });
 
+  // Position updates and broadcasting
   function handlePosition(position) {
     if (
       !position ||
@@ -326,6 +441,206 @@ function registerSocketHandlers(io, socket) {
   socket.on("updatePosition", handlePosition);
   socket.on("userMoved", handlePosition);
 
+  // WebRTC call request
+  const handleCallUser = ({
+    targetId,
+    userToCall,
+    metadata = {},
+    signalData,
+  } = {}) => {
+    const target = targetId || userToCall;
+
+    if (!target) {
+      socket.emit("signal:error", {
+        message: "Target peer ID is required",
+        targetId: null,
+      });
+      return;
+    }
+
+    if (target === socket.id) {
+      socket.emit("signal:error", {
+        message: "Cannot call yourself",
+        targetId: target,
+      });
+      return;
+    }
+
+    if (!users.has(target)) {
+      socket.emit("signal:error", {
+        message: "Target peer not found or offline",
+        targetId: target,
+      });
+      return;
+    }
+
+    const caller = users.get(socket.id);
+    const callerName = caller
+      ? caller.username
+      : `User-${socket.id.slice(0, 4)}`;
+
+    io.to(target).emit("signal:incoming-call", {
+      callerId: socket.id,
+      callerName,
+      metadata,
+      signalData,
+    });
+
+    io.to(target).emit("callUser", {
+      from: socket.id,
+      name: callerName,
+      signal: signalData,
+    });
+  };
+
+  socket.on("signal:call-user", handleCallUser);
+  socket.on("callUser", handleCallUser);
+
+  // Accept an incoming call
+  const handleAcceptCall = ({ targetId, to, signal } = {}) => {
+    const target = targetId || to;
+
+    if (!target || !users.has(target)) {
+      socket.emit("signal:error", {
+        message: "Caller peer not found or offline",
+        targetId: target,
+      });
+      return;
+    }
+
+    const call = registerCall(target, socket.id);
+    const callee = users.get(socket.id);
+    const calleeName = callee
+      ? callee.username
+      : `User-${socket.id.slice(0, 4)}`;
+
+    io.to(target).emit("signal:call-accepted", {
+      peerId: socket.id,
+      peerName: calleeName,
+      callId: call.callId,
+      signal,
+    });
+
+    io.to(target).emit("callAccepted", {
+      signal,
+      from: socket.id,
+    });
+  };
+
+  socket.on("signal:accept-call", handleAcceptCall);
+  socket.on("answerCall", handleAcceptCall);
+
+  socket.on("signal:reject-call", ({ targetId, reason = "declined" } = {}) => {
+    if (!targetId || !users.has(targetId)) return;
+
+    io.to(targetId).emit("signal:call-rejected", {
+      peerId: socket.id,
+      reason,
+    });
+
+    io.to(targetId).emit("callRejected", {
+      peerId: socket.id,
+      reason,
+    });
+  });
+
+  // WebRTC offer, answer and ICE signaling
+  socket.on("signal:offer", ({ targetId, offer } = {}) => {
+    if (!targetId || !users.has(targetId) || !offer) {
+      socket.emit("signal:error", {
+        message: "Target peer not found or offer is missing",
+        targetId,
+      });
+      return;
+    }
+
+    io.to(targetId).emit("signal:offer", {
+      senderId: socket.id,
+      offer,
+    });
+  });
+
+  socket.on("signal:answer", ({ targetId, answer } = {}) => {
+    if (!targetId || !users.has(targetId) || !answer) {
+      socket.emit("signal:error", {
+        message: "Target peer not found or answer is missing",
+        targetId,
+      });
+      return;
+    }
+
+    io.to(targetId).emit("signal:answer", {
+      senderId: socket.id,
+      answer,
+    });
+  });
+
+  socket.on("signal:ice-candidate", ({ targetId, candidate } = {}) => {
+    if (!targetId || !users.has(targetId) || !candidate) {
+      socket.emit("signal:error", {
+        message: "Target peer not found or ICE candidate is missing",
+        targetId,
+      });
+      return;
+    }
+
+    io.to(targetId).emit("signal:ice-candidate", {
+      senderId: socket.id,
+      candidate,
+    });
+  });
+
+  const handleEndCall = ({ targetId, reason = "call_ended" } = {}) => {
+    if (targetId) {
+      endCallBetween(socket.id, targetId);
+
+      if (users.has(targetId)) {
+        io.to(targetId).emit("signal:call-ended", {
+          peerId: socket.id,
+          reason,
+        });
+
+        io.to(targetId).emit("callEnded", {
+          peerId: socket.id,
+          reason,
+        });
+      }
+
+      socket.emit("signal:call-ended", {
+        peerId: targetId,
+        reason,
+      });
+    } else {
+      cleanupUserCalls(socket.id, io, reason);
+    }
+  };
+
+  socket.on("signal:end-call", handleEndCall);
+  socket.on("signal:hangup", handleEndCall);
+  socket.on("endCall", handleEndCall);
+
+  socket.on("signal:mute-status", ({ targetId, isMuted } = {}) => {
+    const currentUser = users.get(socket.id);
+    const muted = Boolean(isMuted);
+
+    if (currentUser) {
+      currentUser.isMuted = muted;
+      users.set(socket.id, currentUser);
+
+      socket.to(currentUser.roomId).emit("userMuteChanged", {
+        id: socket.id,
+        isMuted: muted,
+      });
+    }
+
+    if (targetId && users.has(targetId)) {
+      io.to(targetId).emit("signal:mute-status", {
+        peerId: socket.id,
+        isMuted: muted,
+      });
+    }
+  });
+
   socket.on("ping", (data) => {
     socket.emit("pong", {
       message:
@@ -335,17 +650,7 @@ function registerSocketHandlers(io, socket) {
     });
   });
 
-  // WebRTC offer signaling
-  socket.on("signal:offer", (data = {}) => {
-    if (typeof data.targetId === "string" && data.offer) {
-      io.to(data.targetId).emit("signal:offer", {
-        senderId: socket.id,
-        offer: data.offer,
-      });
-    }
-  });
-
-  // Spatial proximity and nearby participants
+  // Spatial proximity
   socket.on("getNearbyUsers", (data = {}, callback) => {
     try {
       const currentUser = users.get(socket.id);
@@ -368,11 +673,8 @@ function registerSocketHandlers(io, socket) {
         nearby,
       };
 
-      if (typeof callback === "function") {
-        callback(result);
-      } else {
-        socket.emit("nearbyUsers", result);
-      }
+      if (typeof callback === "function") callback(result);
+      else socket.emit("nearbyUsers", result);
     } catch (error) {
       console.error(
         `[PROXIMITY ERROR] ${socket.id}:`,
@@ -388,26 +690,7 @@ function registerSocketHandlers(io, socket) {
     socket.disconnect(true);
   });
 
-  // WebRTC answer signaling
-  socket.on("signal:answer", (data = {}) => {
-    if (typeof data.targetId === "string" && data.answer) {
-      io.to(data.targetId).emit("signal:answer", {
-        senderId: socket.id,
-        answer: data.answer,
-      });
-    }
-  });
-
-  // WebRTC ICE candidate signaling
-  socket.on("signal:ice-candidate", (data = {}) => {
-    if (typeof data.targetId === "string" && data.candidate) {
-      io.to(data.targetId).emit("signal:ice-candidate", {
-        senderId: socket.id,
-        candidate: data.candidate,
-      });
-    }
-  });
-
+  // Persist communication sessions
   socket.on("startCommunicationSession", async (data = {}, callback) => {
     const respond = (result) => {
       if (typeof callback === "function") {
@@ -533,10 +816,17 @@ function registerSocketHandlers(io, socket) {
     }
   });
 
+  // Disconnect cleanup
+  socket.on("disconnecting", (reason) => {
+    cleanupUserCalls(socket.id, io, reason || "peer_disconnected");
+  });
+
   socket.on("disconnect", async (reason) => {
     console.log(
       `[SOCKET DISCONNECT] ${socket.id} (${reason || "unknown reason"})`
     );
+
+    cleanupUserCalls(socket.id, io, reason || "peer_disconnected");
 
     const disconnectedUser = users.get(socket.id);
     users.delete(socket.id);
@@ -620,12 +910,21 @@ function hasUser(id) {
 function clearUsers() {
   users.clear();
   activeSessions.clear();
+  clearActiveCalls();
 }
 
 module.exports = {
   registerSocketHandlers,
   users,
   activeSessions,
+  activeAudioCalls,
+  userCallMap,
+  registerCall,
+  endCallBetween,
+  getCallPeers,
+  cleanupUserCalls,
+  getActiveCallsCount,
+  clearActiveCalls,
   getRoomParticipants,
   getUserCount,
   hasUser,
