@@ -793,6 +793,370 @@ async function testSimultaneousVirtualOfficeInteraction(serverUrl) {
   });
 }
 
+// Test 17: WebRTC Audio Calling Full Handshake & Bidirectional Signaling
+async function testWebRTCAudioCallingFullHandshake(serverUrl) {
+  return new Promise((resolve, reject) => {
+    const caller = io(serverUrl, { transports: ["websocket", "polling"], timeout: 6000 });
+    const callee = io(serverUrl, { transports: ["websocket", "polling"], timeout: 6000 });
+
+    let callerConnected = false;
+    let calleeConnected = false;
+
+    let incomingCallReceived = false;
+    let callAcceptedReceived = false;
+    let offerRelayed = false;
+    let answerRelayed = false;
+    let candidateRelayed = false;
+    let muteStatusRelayed = false;
+    let callEndedReceived = false;
+
+    const timeout = setTimeout(() => {
+      caller.disconnect();
+      callee.disconnect();
+      reject(new Error("WebRTC full audio call handshake timed out"));
+    }, 8000);
+
+    caller.on("connect", () => {
+      callerConnected = true;
+      caller.emit("join", { username: "AliceCaller" });
+      checkReadyToCall();
+    });
+
+    callee.on("connect", () => {
+      calleeConnected = true;
+      callee.emit("join", { username: "BobCallee" });
+      checkReadyToCall();
+    });
+
+    function checkReadyToCall() {
+      if (callerConnected && calleeConnected) {
+        // Step 1: Alice initiates audio call to Bob
+        caller.emit("signal:call-user", {
+          targetId: callee.id,
+          metadata: { audioOnly: true, callType: "voice" },
+        });
+      }
+    }
+
+    // Step 2: Bob receives incoming call and accepts
+    callee.on("signal:incoming-call", (data) => {
+      if (data.callerId === caller.id && data.callerName === "AliceCaller") {
+        incomingCallReceived = true;
+        callee.emit("signal:accept-call", { targetId: caller.id });
+      }
+    });
+
+    // Step 3: Alice receives call-accepted, sends SDP offer
+    caller.on("signal:call-accepted", (data) => {
+      if (data.peerId === callee.id) {
+        callAcceptedReceived = true;
+        caller.emit("signal:offer", {
+          targetId: callee.id,
+          offer: { type: "offer", sdp: "v=0\r\no=Alice 123 456 IN IP4 127.0.0.1\r\ns=ProxiSpeakAudioCall" },
+        });
+      }
+    });
+
+    // Step 4: Bob receives offer, replies with SDP answer
+    callee.on("signal:offer", (data) => {
+      if (data.senderId === caller.id && data.offer && data.offer.type === "offer") {
+        offerRelayed = true;
+        callee.emit("signal:answer", {
+          targetId: caller.id,
+          answer: { type: "answer", sdp: "v=0\r\no=Bob 789 101 IN IP4 127.0.0.1\r\ns=ProxiSpeakAudioAnswer" },
+        });
+      }
+    });
+
+    // Step 5: Alice receives answer, sends ICE candidate
+    caller.on("signal:answer", (data) => {
+      if (data.senderId === callee.id && data.answer && data.answer.type === "answer") {
+        answerRelayed = true;
+        caller.emit("signal:ice-candidate", {
+          targetId: callee.id,
+          candidate: { candidate: "candidate:1 1 UDP 2122260223 127.0.0.1 5000 typ host", sdpMid: "0" },
+        });
+      }
+    });
+
+    // Step 6: Bob receives ICE candidate, Alice tests mute status
+    callee.on("signal:ice-candidate", (data) => {
+      if (data.senderId === caller.id && data.candidate) {
+        candidateRelayed = true;
+        caller.emit("signal:mute-status", {
+          targetId: callee.id,
+          isMuted: true,
+        });
+      }
+    });
+
+    // Step 7: Bob receives mute status, then hangs up
+    callee.on("signal:mute-status", (data) => {
+      if (data.peerId === caller.id && data.isMuted === true) {
+        muteStatusRelayed = true;
+        callee.emit("signal:end-call", {
+          targetId: caller.id,
+          reason: "call_finished",
+        });
+      }
+    });
+
+    // Step 8: Alice receives call-ended event
+    caller.on("signal:call-ended", (data) => {
+      if (data.peerId === callee.id && data.reason === "call_finished") {
+        callEndedReceived = true;
+        cleanupAndResolve();
+      }
+    });
+
+    function cleanupAndResolve() {
+      if (
+        incomingCallReceived &&
+        callAcceptedReceived &&
+        offerRelayed &&
+        answerRelayed &&
+        candidateRelayed &&
+        muteStatusRelayed &&
+        callEndedReceived
+      ) {
+        clearTimeout(timeout);
+        caller.disconnect();
+        callee.disconnect();
+        resolve({
+          incomingCallReceived,
+          callAcceptedReceived,
+          offerRelayed,
+          answerRelayed,
+          candidateRelayed,
+          muteStatusRelayed,
+          callEndedReceived,
+        });
+      }
+    }
+
+    caller.on("connect_error", (e) => reject(e));
+    callee.on("connect_error", (e) => reject(e));
+  });
+}
+
+// Test 18: Mid-Call Abrupt Disconnection & Call State Cleanup
+async function testMidCallAbruptDisconnectionCleanup(serverUrl) {
+  return new Promise(async (resolve, reject) => {
+    const caller = io(serverUrl, { transports: ["websocket", "polling"], timeout: 6000 });
+    const callee = io(serverUrl, { transports: ["websocket", "polling"], timeout: 6000 });
+
+    let callEndedReceivedByCallee = false;
+    let endReasonReceived = null;
+    let peerDisconnectedReceived = false;
+
+    const timeout = setTimeout(() => {
+      caller.disconnect();
+      callee.disconnect();
+      reject(new Error("Mid-call abrupt disconnect cleanup test timed out"));
+    }, 8000);
+
+    try {
+      await Promise.all([
+        new Promise((res, rej) => { caller.once("connect", res); caller.once("connect_error", rej); }),
+        new Promise((res, rej) => { callee.once("connect", res); callee.once("connect_error", rej); }),
+      ]);
+
+      caller.emit("join", { username: "DisconnectingCaller" });
+      callee.emit("join", { username: "RemainingCallee" });
+
+      await new Promise((r) => setTimeout(r, 150));
+
+      const callerId = caller.id;
+      const calleeId = callee.id;
+
+      // Set up listeners BEFORE emitting
+      const incomingCallPromise = new Promise((res) => {
+        callee.once("signal:incoming-call", (data) => {
+          callee.emit("signal:accept-call", { targetId: data.callerId });
+          res(data);
+        });
+      });
+
+      const callAcceptedPromise = new Promise((res) => {
+        caller.once("signal:call-accepted", res);
+      });
+
+      // Now initiate call
+      caller.emit("signal:call-user", { targetId: calleeId });
+
+      await incomingCallPromise;
+      await callAcceptedPromise;
+
+      await new Promise((r) => setTimeout(r, 100));
+
+      // Listen for call-ended and disconnection on remaining callee
+      let participantLeftReceivedByCallee = false;
+
+      callee.on("signal:call-ended", (data) => {
+        if (data.peerId === callerId) {
+          callEndedReceivedByCallee = true;
+          endReasonReceived = data.reason;
+        }
+      });
+
+      callee.on("participantLeft", (data) => {
+        if (data.id === callerId) {
+          participantLeftReceivedByCallee = true;
+        }
+      });
+
+      callee.on("userDisconnected", (data) => {
+        const id = typeof data === "string" ? data : data?.id;
+        if (id === callerId) {
+          peerDisconnectedReceived = true;
+        }
+      });
+
+      // Abruptly sever caller's transport connection
+      caller.io.engine.close();
+
+      // Allow server to execute disconnecting (call cleanup & participantLeft) and disconnect lifecycles
+      await new Promise((r) => setTimeout(r, 600));
+
+      clearTimeout(timeout);
+      callee.disconnect();
+
+      resolve({
+        callEndedReceivedByCallee,
+        endReasonReceived,
+        participantLeftReceivedByCallee: participantLeftReceivedByCallee || peerDisconnectedReceived,
+      });
+    } catch (err) {
+      clearTimeout(timeout);
+      caller.disconnect();
+      callee.disconnect();
+      reject(err);
+    }
+  });
+}
+
+// Test 19: WebRTC Error Handling & Reconnection Scenarios
+async function testWebRTCErrorHandlingAndReconnection(serverUrl) {
+  return new Promise(async (resolve, reject) => {
+    const clientA = io(serverUrl, { transports: ["websocket", "polling"], timeout: 6000 });
+    const clientB = io(serverUrl, { transports: ["websocket", "polling"], timeout: 6000 });
+
+    let offlineErrorReceived = false;
+    let selfCallErrorReceived = false;
+    let callRejectedReceived = false;
+    let postReconnectCallSucceeded = false;
+
+    const timeout = setTimeout(() => {
+      clientA.disconnect();
+      clientB.disconnect();
+      reject(new Error("WebRTC error handling and reconnection test timed out"));
+    }, 10000);
+
+    try {
+      await Promise.all([
+        new Promise((res, rej) => { clientA.once("connect", res); clientA.once("connect_error", rej); }),
+        new Promise((res, rej) => { clientB.once("connect", res); clientB.once("connect_error", rej); }),
+      ]);
+
+      clientA.emit("join", { username: "TesterA" });
+      clientB.emit("join", { username: "TesterB" });
+      await new Promise((r) => setTimeout(r, 150));
+
+      // 1. Error Test A: Calling non-existent / offline peer
+      const offlinePromise = new Promise((res) => {
+        clientA.once("signal:error", (data) => {
+          if (data.message.includes("offline") || data.message.includes("not found")) {
+            offlineErrorReceived = true;
+          }
+          res();
+        });
+      });
+      clientA.emit("signal:call-user", { targetId: "non-existent-peer-xyz" });
+      await offlinePromise;
+
+      // 2. Error Test B: Self-calling rejection
+      const selfCallPromise = new Promise((res) => {
+        clientA.once("signal:error", (data) => {
+          if (data.message.includes("yourself")) {
+            selfCallErrorReceived = true;
+          }
+          res();
+        });
+      });
+      clientA.emit("signal:call-user", { targetId: clientA.id });
+      await selfCallPromise;
+
+      // 3. Rejection Test C: Callee declines call
+      const incomingPromise = new Promise((res) => {
+        clientB.once("signal:incoming-call", (data) => {
+          clientB.emit("signal:reject-call", { targetId: data.callerId, reason: "busy_in_meeting" });
+          res();
+        });
+      });
+      const rejectedPromise = new Promise((res) => {
+        clientA.once("signal:call-rejected", (data) => {
+          if (data.peerId === clientB.id && data.reason === "busy_in_meeting") {
+            callRejectedReceived = true;
+          }
+          res();
+        });
+      });
+
+      clientA.emit("signal:call-user", { targetId: clientB.id });
+      await incomingPromise;
+      await rejectedPromise;
+
+      // 4. Reconnection Test D: Client A disconnects, re-establishes socket, and successfully calls Client B
+      clientA.disconnect();
+      await new Promise((r) => setTimeout(r, 200));
+
+      const reconnectedClientA = io(serverUrl, { transports: ["websocket", "polling"], timeout: 6000 });
+      await new Promise((res) => reconnectedClientA.once("connect", res));
+      reconnectedClientA.emit("join", { username: "TesterA-Reconnected" });
+      await new Promise((r) => setTimeout(r, 150));
+
+      const reconnectedIncomingPromise = new Promise((res) => {
+        clientB.once("signal:incoming-call", (data) => {
+          clientB.emit("signal:accept-call", { targetId: data.callerId });
+          res();
+        });
+      });
+      const reconnectedAcceptedPromise = new Promise((res) => {
+        reconnectedClientA.once("signal:call-accepted", (data) => {
+          if (data.peerId === clientB.id) {
+            postReconnectCallSucceeded = true;
+          }
+          res();
+        });
+      });
+
+      reconnectedClientA.emit("signal:call-user", { targetId: clientB.id });
+      await reconnectedIncomingPromise;
+      await reconnectedAcceptedPromise;
+
+      // Hang up cleanly
+      reconnectedClientA.emit("signal:end-call", { targetId: clientB.id });
+      await new Promise((r) => setTimeout(r, 100));
+
+      clearTimeout(timeout);
+      reconnectedClientA.disconnect();
+      clientB.disconnect();
+
+      resolve({
+        offlineErrorReceived,
+        selfCallErrorReceived,
+        callRejectedReceived,
+        postReconnectCallSucceeded,
+      });
+    } catch (err) {
+      clearTimeout(timeout);
+      clientA.disconnect();
+      clientB.disconnect();
+      reject(err);
+    }
+  });
+}
+
 async function runTest() {
   let hasErrors = false;
   console.log("Starting ProxiSpeak server for verification...");
@@ -1011,6 +1375,56 @@ async function runTest() {
       hasErrors = true;
     }
 
+    // 17. WebRTC Audio Calling Full Handshake & Bidirectional Signaling
+    console.log("\n--- [17] Testing WebRTC Audio Calling Full Handshake & Bidirectional Signaling ---");
+    const fullHandshakeResult = await testWebRTCAudioCallingFullHandshake("http://localhost:5000");
+    if (
+      fullHandshakeResult.incomingCallReceived &&
+      fullHandshakeResult.callAcceptedReceived &&
+      fullHandshakeResult.offerRelayed &&
+      fullHandshakeResult.answerRelayed &&
+      fullHandshakeResult.candidateRelayed &&
+      fullHandshakeResult.muteStatusRelayed &&
+      fullHandshakeResult.callEndedReceived
+    ) {
+      console.log("--> PASS: Full WebRTC audio call lifecycle verified: call-user -> incoming-call -> accept-call -> call-accepted.");
+      console.log("--> PASS: Bidirectional SDP exchange (offer & answer) and ICE candidate signaling relayed cleanly.");
+      console.log("--> PASS: In-call mute status toggles and explicit end-call teardown executed without error.");
+    } else {
+      console.error("--> FAIL: Full audio calling handshake failed:", fullHandshakeResult);
+      hasErrors = true;
+    }
+
+    // 18. Mid-Call Abrupt Disconnection & Call State Cleanup
+    console.log("\n--- [18] Testing Mid-Call Abrupt Disconnection & Communication State Cleanup ---");
+    const abruptDisconnectResult = await testMidCallAbruptDisconnectionCleanup("http://localhost:5000");
+    if (abruptDisconnectResult.callEndedReceivedByCallee && abruptDisconnectResult.participantLeftReceivedByCallee) {
+      console.log("--> PASS: Peer's abrupt transport drop instantly detected during an active audio call.");
+      console.log(`--> PASS: Remaining peer received signal:call-ended (reason: "${abruptDisconnectResult.endReasonReceived}").`);
+      console.log("--> PASS: Active call memory pruned immediately, preventing zombie WebRTC peer connections.");
+    } else {
+      console.error("--> FAIL: Mid-call abrupt disconnect cleanup failed:", abruptDisconnectResult);
+      hasErrors = true;
+    }
+
+    // 19. WebRTC Error Handling & Reconnection Scenarios
+    console.log("\n--- [19] Testing WebRTC Error Handling & Post-Reconnection Call Recovery ---");
+    const errorHandlingResult = await testWebRTCErrorHandlingAndReconnection("http://localhost:5000");
+    if (
+      errorHandlingResult.offlineErrorReceived &&
+      errorHandlingResult.selfCallErrorReceived &&
+      errorHandlingResult.callRejectedReceived &&
+      errorHandlingResult.postReconnectCallSucceeded
+    ) {
+      console.log("--> PASS: Calling offline or non-existent peer cleanly rejected with signal:error.");
+      console.log("--> PASS: Self-calling attempts blocked with validation error message.");
+      console.log("--> PASS: Call rejection and decline reasons transmitted to caller accurately.");
+      console.log("--> PASS: Client reconnecting after disconnection immediately resumed full calling capabilities.");
+    } else {
+      console.error("--> FAIL: WebRTC error handling and reconnection test failed:", errorHandlingResult);
+      hasErrors = true;
+    }
+
   } catch (err) {
     console.error("\n[TEST RUNNER EXCEPTION]:", err.message || err);
     hasErrors = true;
@@ -1024,7 +1438,7 @@ async function runTest() {
       console.error("\n❌ VERIFICATION FAILED: One or more tests did not pass.\n");
       process.exit(1);
     } else {
-      console.log("\n✅ ALL TESTS PASSED: All 16 backend modules, multi-user simultaneous interactions, proximity dynamics, and endpoints verified.\n");
+      console.log("\n✅ ALL TESTS PASSED: All 19 backend modules, WebRTC audio signaling, state cleanup, and error-handling verified.\n");
       process.exit(0);
     }
   }

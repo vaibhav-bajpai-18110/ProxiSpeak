@@ -13,7 +13,7 @@ The backend is fully integrated with and verified against both the ProxiSpeak Re
 - **WebSocket Engine**: Socket.IO (`^4.8.4`)
 - **Cross-Origin Handling**: CORS (`^2.8.6`)
 - **Environment Management**: `dotenv` (`^18.0.7`)
-- **Automated Verification**: Custom 16-stage end-to-end integration test runner
+- **Automated Verification**: Custom 19-stage end-to-end integration test runner
 
 ---
 
@@ -140,14 +140,24 @@ PORT=5000
 | `getNearbyUsers` | Client $\rightarrow$ Server | `{ radius? }` (with callback) | Computes and returns participants within audio earshot radius (distance, volume attenuation, stereo pan). |
 | `nearbyUsers` | Server $\rightarrow$ Client | `{ roomId, radius, nearby: [...] }` | Fallback event emitted if `getNearbyUsers` is called without callback. |
 
-### WebRTC Audio Signaling Relays
+### WebRTC Audio Calling & Signaling Protocol
+
+The backend orchestrates peer-to-peer WebRTC audio call lifecycle and state management:
 
 | Event Name | Direction | Payload | Description |
 | :--- | :--- | :--- | :--- |
+| `signal:call-user` / `callUser` | Client $\rightarrow$ Server | `{ targetId, metadata? }` | Caller initiates an audio call. Checks online status and prevents self-calling. |
+| `signal:incoming-call` | Server $\rightarrow$ Target | `{ callerId, callerName, metadata? }` | Delivered to recipient with caller metadata. |
+| `signal:accept-call` / `answerCall` | Client $\rightarrow$ Server | `{ targetId }` | Callee accepts the incoming call. Registers call in `activeAudioCalls`. |
+| `signal:call-accepted` | Server $\rightarrow$ Caller | `{ peerId, peerName, callId }` | Notifies caller to begin WebRTC SDP offer negotiation. |
+| `signal:reject-call` | Client $\rightarrow$ Server | `{ targetId, reason? }` | Callee declines call; relays rejection reason (`signal:call-rejected`). |
 | `signal:offer` | Client $\leftrightarrow$ Server | `{ targetId, offer }` | Relays WebRTC SDP offer to target peer. Emits `signal:error` if peer is offline. |
 | `signal:answer` | Client $\leftrightarrow$ Server | `{ targetId, answer }` | Relays WebRTC SDP answer to target peer. Emits `signal:error` if peer is offline. |
 | `signal:ice-candidate`| Client $\leftrightarrow$ Server | `{ targetId, candidate }`| Relays ICE candidate to target peer. Emits `signal:error` if peer is offline. |
-| `signal:error` | Server $\rightarrow$ Client | `{ message, targetId }` | Emitted to sender if target peer does not exist or has disconnected. |
+| `signal:mute-status` | Client $\rightarrow$ Server | `{ targetId?, isMuted }` | Relays mute state to peer and broadcasts `userMuteChanged` to the room. |
+| `signal:end-call` / `signal:hangup` | Client $\rightarrow$ Server | `{ targetId?, reason? }` | Terminates active call, cleans in-memory state, and emits `signal:call-ended`. |
+| `signal:call-ended` | Server $\rightarrow$ Client(s) | `{ peerId, reason, callId? }` | Emitted when peer hangs up or disconnects abruptly. |
+| `signal:error` | Server $\rightarrow$ Client | `{ message, targetId }` | Emitted when target peer is offline, invalid, or self-calling is attempted. |
 
 ### Validation & Diagnostics
 
@@ -238,12 +248,12 @@ npm start
 ```
 Starts Express & Socket.IO server on `http://localhost:5000`.
 
-### Run Automated 16-Module Verification Suite
+### Run Automated 19-Module Verification Suite
 ```bash
 cd server
 npm test
 ```
-Executes all 16 automated integration tests:
+Executes all 19 automated integration tests:
 1. `GET /` (Root route)
 2. `GET /api/health` (Frontend health contract)
 3. `GET /api/status` (Active users and uptime)
@@ -259,11 +269,16 @@ Executes all 16 automated integration tests:
 13. Real-time multi-tab avatar movement synchronization (Alice, Bob, Charlie)
 14. Unexpected disconnections & abrupt transport teardown handling
 15. Exhaustive invalid inputs battery & crash resistance
-16. **Simultaneous Multi-User Virtual Office Interaction & Spatial Proximity Calculations**
+16. Simultaneous multi-user virtual office interaction & spatial proximity calculations
+17. **WebRTC Audio Calling Full Handshake & Bidirectional Signaling (`call-user` $\rightarrow$ `accept-call` $\rightarrow$ `offer`/`answer` $\rightarrow$ `ice-candidate` $\rightarrow$ `mute-status` $\rightarrow$ `end-call`)**
+18. **Mid-Call Abrupt Disconnection & Communication State Cleanup (instant peer teardown notification & zombie call prevention)**
+19. **WebRTC Error Handling & Post-Reconnection Call Recovery (offline peer rejection, self-call blocking, call decline, and reconnection resumption)**
 
-### Interactive Multi-Tab Visual Demo
+### Interactive Multi-Tab Visual & Audio Demo
 1. Start server: `npm start`
-2. Open [http://localhost:5000/demo](http://localhost:5000/demo) in **two or three separate browser tabs**.
+2. Open [http://localhost:5000/demo](http://localhost:5000/demo) in **two separate browser tabs**.
 3. Name Tab 1 "Alice" and Tab 2 "Bob".
 4. Move either avatar using keyboard or mouse; watch real-time coordinates, avatar position, proximity voice range badges (`🎙️ Audible`), and room member lists sync instantaneously!
-5. Close Tab 1; observe Tab 2 immediately logging the disconnect and clearing Alice from the screen.
+5. In Tab 1, click **"Call"** next to Bob. Tab 2 displays an **"Alice is calling you..."** banner with Accept/Decline buttons.
+6. Click **"Accept"** in Tab 2: both tabs enter the active call state with live mute/unmute and hang-up controls.
+7. Close Tab 1 mid-call; observe Tab 2 immediately receiving `signal:call-ended` ("transport close"), clearing the active call banner, and updating the member list.

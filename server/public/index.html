@@ -199,6 +199,109 @@
       height: 12px;
       border-radius: 50%;
     }
+    .call-btn {
+      background: #0284c7;
+      color: #ffffff;
+      border: none;
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .call-btn:hover {
+      background: #0369a1;
+    }
+    .call-banner {
+      display: none;
+      background: #1e3a8a;
+      border: 1px solid #3b82f6;
+      border-radius: 0.5rem;
+      padding: 0.75rem 1rem;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      margin-bottom: 0.5rem;
+      animation: fadeIn 0.3s ease;
+    }
+    .call-banner.active {
+      display: flex;
+    }
+    .call-active-bar {
+      display: none;
+      background: #064e3b;
+      border: 1px solid #10b981;
+      border-radius: 0.5rem;
+      padding: 0.75rem 1rem;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      margin-bottom: 0.5rem;
+    }
+    .call-active-bar.active {
+      display: flex;
+    }
+    .call-actions {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .btn-accept {
+      background: #10b981;
+      color: #fff;
+      border: none;
+      padding: 5px 12px;
+      border-radius: 4px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn-decline {
+      background: #ef4444;
+      color: #fff;
+      border: none;
+      padding: 5px 12px;
+      border-radius: 4px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn-mute {
+      background: #475569;
+      color: #fff;
+      border: none;
+      padding: 5px 12px;
+      border-radius: 4px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn-mute.is-muted {
+      background: #f59e0b;
+    }
+    .pulse-call {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #10b981;
+      box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
+      animation: pulse 1.5s infinite;
+    }
+    @keyframes pulse {
+      0% {
+        transform: scale(0.95);
+        box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
+      }
+      70% {
+        transform: scale(1);
+        box-shadow: 0 0 0 8px rgba(16, 185, 129, 0);
+      }
+      100% {
+        transform: scale(0.95);
+        box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+      }
+    }
     .log-card {
       background: #1e293b;
       border: 1px solid #334155;
@@ -270,6 +373,31 @@
       </div>
     </div>
 
+    <!-- WebRTC Audio Calling Controls: Incoming Call Banner -->
+    <div id="incomingCallBanner" class="call-banner">
+      <div>
+        <span style="font-size: 1.1rem; margin-right: 0.5rem;">📞</span>
+        <span id="callerNameText" style="font-weight: 600;">Someone</span> is calling you...
+      </div>
+      <div class="call-actions">
+        <button id="btnAcceptCall" class="btn-accept">Accept</button>
+        <button id="btnDeclineCall" class="btn-decline">Decline</button>
+      </div>
+    </div>
+
+    <!-- WebRTC Audio Calling Controls: Active Call Bar -->
+    <div id="activeCallBar" class="call-active-bar">
+      <div style="display: flex; align-items: center; gap: 0.75rem;">
+        <div class="pulse-call"></div>
+        <span>In Audio Call with <b id="activePeerName" style="color: #6ee7b7;">Peer</b></span>
+        <span id="callMuteStatusBadge" style="font-size: 0.75rem; padding: 2px 6px; background: rgba(0,0,0,0.3); border-radius: 4px; display: none;">Muted</span>
+      </div>
+      <div class="call-actions">
+        <button id="btnToggleCallMute" class="btn-mute">Mute</button>
+        <button id="btnHangupCall" class="btn-decline">Hang Up</button>
+      </div>
+    </div>
+
     <div class="layout-row">
       <div class="canvas-card">
         <canvas id="gameCanvas" width="660" height="480"></canvas>
@@ -310,6 +438,19 @@
     const roomSelect = document.getElementById("roomSelect");
     const usernameInput = document.getElementById("usernameInput");
     const eventLog = document.getElementById("eventLog");
+
+    const incomingCallBanner = document.getElementById("incomingCallBanner");
+    const callerNameText = document.getElementById("callerNameText");
+    const btnAcceptCall = document.getElementById("btnAcceptCall");
+    const btnDeclineCall = document.getElementById("btnDeclineCall");
+    const activeCallBar = document.getElementById("activeCallBar");
+    const activePeerName = document.getElementById("activePeerName");
+    const callMuteStatusBadge = document.getElementById("callMuteStatusBadge");
+    const btnToggleCallMute = document.getElementById("btnToggleCallMute");
+    const btnHangupCall = document.getElementById("btnHangupCall");
+
+    let currentCall = null; // { peerId, peerName, isMuted }
+    let pendingIncomingCall = null; // { callerId, callerName }
 
     function logEvent(msg, highlight = false) {
       const time = new Date().toLocaleTimeString();
@@ -484,24 +625,158 @@
       `;
       participantList.appendChild(myBadge);
 
-      // Render other participants in room with proximity indicators
+      // Render other participants in room with proximity indicators and Call button
       roomParticipantsMap.forEach((p) => {
         if (p.id !== myId) {
           const dist = Math.round(Math.hypot(myUser.x - p.x, myUser.y - p.y));
           const inRange = dist <= 120;
+          const isInCallWithMe = currentCall && currentCall.peerId === p.id;
           const badge = document.createElement("div");
           badge.className = "participant-badge";
           badge.innerHTML = `
             <div class="avatar-dot" style="background: ${p.color || '#10B981'}"></div>
-            <span>${p.username || p.id.slice(0, 6)}</span>
-            <span style="margin-left: auto; font-size: 0.72rem; padding: 2px 6px; border-radius: 4px; ${inRange ? 'background: rgba(16, 185, 129, 0.2); color: #34d399; font-weight: 600;' : 'background: rgba(148, 163, 184, 0.1); color: #94a3b8;'}">
-              ${inRange ? '🎙️ ' + dist + 'px (Audible)' : dist + 'px'}
-            </span>
+            <div style="display: flex; flex-direction: column; gap: 2px;">
+              <span>${p.username || p.id.slice(0, 6)} ${p.isMuted ? '🔇' : ''}</span>
+              <span style="font-size: 0.7rem; color: ${inRange ? '#34d399' : '#64748b'};">
+                ${inRange ? 'Audible (' + dist + 'px)' : dist + 'px'}
+              </span>
+            </div>
+            <div style="margin-left: auto; display: flex; align-items: center; gap: 0.35rem;">
+              ${
+                isInCallWithMe
+                  ? '<span style="font-size: 0.75rem; color: #10b981; font-weight: 600;">In Call</span>'
+                  : `<button class="call-btn" data-peer-id="${p.id}" data-peer-name="${p.username || p.id.slice(0, 5)}">Call</button>`
+              }
+            </div>
           `;
           participantList.appendChild(badge);
         }
       });
+
+      // Bind click handlers to dynamic Call buttons
+      document.querySelectorAll(".call-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const peerId = btn.getAttribute("data-peer-id");
+          const peerName = btn.getAttribute("data-peer-name");
+          startCall(peerId, peerName);
+        });
+      });
     }
+
+    // Call Actions & WebRTC Signaling Logic
+    function startCall(targetId, targetName) {
+      if (currentCall) {
+        logEvent(`Already in a call with ${currentCall.peerName}. Hang up first.`);
+        return;
+      }
+      logEvent(`Initiating audio call to ${targetName}...`, true);
+      socket.emit("signal:call-user", {
+        targetId,
+        metadata: { initiatedAt: Date.now() },
+      });
+    }
+
+    function resetCallUI() {
+      currentCall = null;
+      pendingIncomingCall = null;
+      incomingCallBanner.classList.remove("active");
+      activeCallBar.classList.remove("active");
+      btnToggleCallMute.classList.remove("is-muted");
+      btnToggleCallMute.textContent = "Mute";
+      callMuteStatusBadge.style.display = "none";
+      renderParticipantsList();
+    }
+
+    btnAcceptCall.addEventListener("click", () => {
+      if (!pendingIncomingCall) return;
+      const callerId = pendingIncomingCall.callerId;
+      const callerName = pendingIncomingCall.callerName;
+
+      socket.emit("signal:accept-call", { targetId: callerId });
+      currentCall = { peerId: callerId, peerName: callerName, isMuted: false };
+
+      incomingCallBanner.classList.remove("active");
+      activePeerName.textContent = callerName;
+      activeCallBar.classList.add("active");
+      logEvent(`Accepted call from ${callerName}. Call session active!`, true);
+      renderParticipantsList();
+    });
+
+    btnDeclineCall.addEventListener("click", () => {
+      if (!pendingIncomingCall) return;
+      socket.emit("signal:reject-call", {
+        targetId: pendingIncomingCall.callerId,
+        reason: "declined",
+      });
+      incomingCallBanner.classList.remove("active");
+      logEvent(`Declined call from ${pendingIncomingCall.callerName}`);
+      pendingIncomingCall = null;
+    });
+
+    btnHangupCall.addEventListener("click", () => {
+      if (!currentCall) return;
+      const peerId = currentCall.peerId;
+      socket.emit("signal:end-call", { targetId: peerId, reason: "user_hangup" });
+      logEvent(`Ended call with ${currentCall.peerName}`);
+      resetCallUI();
+    });
+
+    btnToggleCallMute.addEventListener("click", () => {
+      if (!currentCall) return;
+      currentCall.isMuted = !currentCall.isMuted;
+      btnToggleCallMute.classList.toggle("is-muted", currentCall.isMuted);
+      btnToggleCallMute.textContent = currentCall.isMuted ? "Unmute" : "Mute";
+      callMuteStatusBadge.style.display = currentCall.isMuted ? "inline" : "none";
+
+      socket.emit("signal:mute-status", {
+        targetId: currentCall.peerId,
+        isMuted: currentCall.isMuted,
+      });
+      logEvent(`Microphone ${currentCall.isMuted ? 'muted' : 'unmuted'}`);
+    });
+
+    // Signaling Socket Event Listeners
+    socket.on("signal:incoming-call", (data) => {
+      pendingIncomingCall = { callerId: data.callerId, callerName: data.callerName };
+      callerNameText.textContent = data.callerName || `User-${data.callerId.slice(0, 4)}`;
+      incomingCallBanner.classList.add("active");
+      logEvent(`Incoming call from ${data.callerName} (${data.callerId.slice(0, 5)})`, true);
+    });
+
+    socket.on("signal:call-accepted", (data) => {
+      currentCall = { peerId: data.peerId, peerName: data.peerName, isMuted: false };
+      activePeerName.textContent = data.peerName || `User-${data.peerId.slice(0, 4)}`;
+      activeCallBar.classList.add("active");
+      logEvent(`Call accepted by ${data.peerName}! WebRTC audio session active.`, true);
+      renderParticipantsList();
+    });
+
+    socket.on("signal:call-rejected", (data) => {
+      logEvent(`Call declined: ${data.reason || "Peer declined"}`, false);
+      resetCallUI();
+    });
+
+    socket.on("signal:call-ended", (data) => {
+      logEvent(`Call ended (${data.reason || "peer ended call"})`);
+      resetCallUI();
+    });
+
+    socket.on("signal:mute-status", (data) => {
+      logEvent(`Peer ${data.isMuted ? 'muted' : 'unmuted'} their microphone`);
+    });
+
+    socket.on("userMuteChanged", (data) => {
+      if (roomParticipantsMap.has(data.id)) {
+        const u = roomParticipantsMap.get(data.id);
+        u.isMuted = data.isMuted;
+        roomParticipantsMap.set(data.id, u);
+        renderParticipantsList();
+      }
+    });
+
+    socket.on("signal:error", (data) => {
+      logEvent(`⚠️ WebRTC Signaling Error: ${data.message}`, true);
+    });
 
     // Name change listener
     usernameInput.addEventListener("change", (e) => {

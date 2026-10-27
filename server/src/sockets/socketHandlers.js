@@ -11,8 +11,122 @@ const {
   getNearbyParticipants,
 } = require("../services/proximityService");
 
-// In-memory store of active users: socket.id -> { id, username, roomId, x, y, color }
+// In-memory store of active users: socket.id -> { id, username, roomId, x, y, color, isMuted }
 const users = new Map();
+
+// In-memory store of active audio calls:
+// activeAudioCalls: callId -> { callId, callerId, calleeId, startedAt, status }
+// userCallMap: socketId -> Set<callId>
+const activeAudioCalls = new Map();
+const userCallMap = new Map();
+
+/**
+ * Registers an active audio call between two peers
+ */
+function registerCall(callerId, calleeId) {
+  const callId = `call_${callerId}_${calleeId}_${Date.now()}`;
+  const callRecord = {
+    callId,
+    callerId,
+    calleeId,
+    startedAt: Date.now(),
+    status: "active",
+  };
+  activeAudioCalls.set(callId, callRecord);
+
+  if (!userCallMap.has(callerId)) userCallMap.set(callerId, new Set());
+  if (!userCallMap.has(calleeId)) userCallMap.set(calleeId, new Set());
+  userCallMap.get(callerId).add(callId);
+  userCallMap.get(calleeId).add(callId);
+
+  return callRecord;
+}
+
+/**
+ * Terminates any active call between two specific users
+ */
+function endCallBetween(userA, userB) {
+  const callsToTerminate = [];
+  for (const [callId, call] of activeAudioCalls.entries()) {
+    if (
+      (call.callerId === userA && call.calleeId === userB) ||
+      (call.callerId === userB && call.calleeId === userA)
+    ) {
+      callsToTerminate.push(callId);
+    }
+  }
+  for (const callId of callsToTerminate) {
+    const call = activeAudioCalls.get(callId);
+    if (call) {
+      userCallMap.get(call.callerId)?.delete(callId);
+      userCallMap.get(call.calleeId)?.delete(callId);
+      activeAudioCalls.delete(callId);
+    }
+  }
+  return callsToTerminate.length > 0;
+}
+
+/**
+ * Returns all peer socket IDs currently in an active call with socketId
+ */
+function getCallPeers(socketId) {
+  const callIds = userCallMap.get(socketId);
+  if (!callIds || callIds.size === 0) return [];
+  const peers = new Set();
+  for (const callId of callIds) {
+    const call = activeAudioCalls.get(callId);
+    if (call) {
+      if (call.callerId === socketId) peers.add(call.calleeId);
+      else if (call.calleeId === socketId) peers.add(call.callerId);
+    }
+  }
+  return Array.from(peers);
+}
+
+/**
+ * Cleans up all active audio call states for a disconnected user
+ * Notifies each connected peer that the call has ended
+ */
+function cleanupUserCalls(socketId, io, reason = "peer_disconnected") {
+  const callIds = userCallMap.get(socketId);
+  if (!callIds || callIds.size === 0) return [];
+  const terminatedPeers = [];
+
+  for (const callId of Array.from(callIds)) {
+    const call = activeAudioCalls.get(callId);
+    if (call) {
+      const otherPeerId = call.callerId === socketId ? call.calleeId : call.callerId;
+      userCallMap.get(otherPeerId)?.delete(callId);
+      activeAudioCalls.delete(callId);
+
+      if (otherPeerId) {
+        terminatedPeers.push(otherPeerId);
+        if (io) {
+          io.to(otherPeerId).emit("signal:call-ended", {
+            peerId: socketId,
+            reason,
+            callId,
+          });
+          io.to(otherPeerId).emit("callEnded", {
+            peerId: socketId,
+            reason,
+          });
+        }
+      }
+    }
+  }
+  userCallMap.delete(socketId);
+  return terminatedPeers;
+}
+
+function getActiveCallsCount() {
+  return activeAudioCalls.size;
+}
+
+function clearActiveCalls() {
+  activeAudioCalls.clear();
+  userCallMap.clear();
+}
 
 // Map bounds for the virtual office
 const MAP_BOUNDS = {
@@ -326,7 +440,83 @@ function registerSocketHandlers(io, socket) {
     handleUpdatePosition(socket, positionData);
   });
 
-  // 8. WebRTC Signaling Relays with Target Validation
+  // 8. WebRTC Audio Calling Signaling & Call State Handlers
+  const handleCallUser = ({ targetId, userToCall, metadata = {}, signalData } = {}) => {
+    const target = targetId || userToCall;
+    if (!target) {
+      socket.emit("signal:error", { message: "Target peer ID is required", targetId: null });
+      return;
+    }
+    if (target === socket.id) {
+      socket.emit("signal:error", { message: "Cannot call yourself", targetId: target });
+      return;
+    }
+    if (!users.has(target)) {
+      socket.emit("signal:error", { message: "Target peer not found or offline", targetId: target });
+      return;
+    }
+
+    const caller = users.get(socket.id);
+    const callerName = caller ? caller.username : `User-${socket.id.slice(0, 4)}`;
+
+    io.to(target).emit("signal:incoming-call", {
+      callerId: socket.id,
+      callerName,
+      metadata,
+      signalData,
+    });
+
+    // Also emit frontend-compatible alias
+    io.to(target).emit("callUser", {
+      from: socket.id,
+      name: callerName,
+      signal: signalData,
+    });
+  };
+
+  socket.on("signal:call-user", handleCallUser);
+  socket.on("callUser", handleCallUser);
+
+  const handleAcceptCall = ({ targetId, to, signal } = {}) => {
+    const target = targetId || to;
+    if (!target || !users.has(target)) {
+      socket.emit("signal:error", { message: "Caller peer not found or offline", targetId: target });
+      return;
+    }
+
+    const call = registerCall(target, socket.id);
+    const callee = users.get(socket.id);
+    const calleeName = callee ? callee.username : `User-${socket.id.slice(0, 4)}`;
+
+    io.to(target).emit("signal:call-accepted", {
+      peerId: socket.id,
+      peerName: calleeName,
+      callId: call.callId,
+      signal,
+    });
+
+    io.to(target).emit("callAccepted", {
+      signal,
+      from: socket.id,
+    });
+  };
+
+  socket.on("signal:accept-call", handleAcceptCall);
+  socket.on("answerCall", handleAcceptCall);
+
+  socket.on("signal:reject-call", ({ targetId, reason = "declined" } = {}) => {
+    if (targetId && users.has(targetId)) {
+      io.to(targetId).emit("signal:call-rejected", {
+        peerId: socket.id,
+        reason,
+      });
+      io.to(targetId).emit("callRejected", {
+        peerId: socket.id,
+        reason,
+      });
+    }
+  });
+
   socket.on("signal:offer", ({ targetId, offer } = {}) => {
     if (!targetId || !users.has(targetId)) {
       socket.emit("signal:error", { message: "Target peer not found or disconnected", targetId });
@@ -366,6 +556,50 @@ function registerSocketHandlers(io, socket) {
     }
   });
 
+  const handleEndCall = ({ targetId, reason = "call_ended" } = {}) => {
+    if (targetId) {
+      endCallBetween(socket.id, targetId);
+      if (users.has(targetId)) {
+        io.to(targetId).emit("signal:call-ended", {
+          peerId: socket.id,
+          reason,
+        });
+        io.to(targetId).emit("callEnded", {
+          peerId: socket.id,
+          reason,
+        });
+      }
+      socket.emit("signal:call-ended", {
+        peerId: targetId,
+        reason,
+      });
+    } else {
+      cleanupUserCalls(socket.id, io, reason);
+    }
+  };
+
+  socket.on("signal:end-call", handleEndCall);
+  socket.on("signal:hangup", handleEndCall);
+  socket.on("endCall", handleEndCall);
+
+  socket.on("signal:mute-status", ({ targetId, isMuted } = {}) => {
+    const user = users.get(socket.id);
+    const muted = Boolean(isMuted);
+    if (user) {
+      user.isMuted = muted;
+      socket.to(user.roomId).emit("userMuteChanged", {
+        id: socket.id,
+        isMuted: muted,
+      });
+    }
+    if (targetId && users.has(targetId)) {
+      io.to(targetId).emit("signal:mute-status", {
+        peerId: socket.id,
+        isMuted: muted,
+      });
+    }
+  });
+
   // 9. Ping-Pong event (maintains backward compatibility)
   socket.on("ping", (data) => {
     socket.emit("pong", data || "pong");
@@ -401,6 +635,9 @@ function registerSocketHandlers(io, socket) {
     const existingUser = users.get(socket.id);
     console.log(`[SOCKET DISCONNECTING] User ${socket.id} disconnecting. Reason: ${reason}. Active rooms:`, Array.from(socket.rooms));
 
+    // Clean up all active WebRTC audio calls and notify peers immediately
+    cleanupUserCalls(socket.id, io, reason || "peer_disconnected");
+
     const notifiedRooms = new Set();
     for (const room of socket.rooms) {
       if (room !== socket.id) {
@@ -426,6 +663,9 @@ function registerSocketHandlers(io, socket) {
 
   // 12. Disconnect Lifecycle with Dual-Format Notification (Frontend String + Backend Object)
   socket.on("disconnect", (reason) => {
+    // Secondary safety cleanup for audio calls in case disconnecting did not trigger
+    cleanupUserCalls(socket.id, io, reason || "peer_disconnected");
+
     if (!users.has(socket.id)) {
       return;
     }
@@ -457,11 +697,20 @@ function hasUser(id) {
 
 function clearUsers() {
   users.clear();
+  clearActiveCalls();
 }
 
 module.exports = {
   registerSocketHandlers,
   users,
+  activeAudioCalls,
+  userCallMap,
+  registerCall,
+  endCallBetween,
+  getCallPeers,
+  cleanupUserCalls,
+  getActiveCallsCount,
+  clearActiveCalls,
   getRoomParticipants,
   getUserCount,
   hasUser,

@@ -14,7 +14,7 @@ proxyspeak/
 │   │   ├── index.js          # Express server, REST APIs, & process safety nets
 │   │   ├── sockets/          # Real-time Socket.IO room, movement, proximity & WebRTC handlers
 │   │   └── services/         # Spatial proximity, audio rolloff & stereo panning calculations
-│   ├── verify.js             # Automated 16-module integration test suite
+│   ├── verify.js             # Automated 19-module integration test suite
 │   ├── package.json          # Dependencies and scripts (start, test)
 │   └── README.md             # Complete backend API, Socket.IO & proximity documentation
 └── README.md                 # Project overview & quick start
@@ -41,22 +41,24 @@ The server will start on `http://localhost:5000`.
 cd server
 npm test
 ```
-Runs the comprehensive 16-module verification suite covering:
+Runs the comprehensive 19-module verification suite covering:
 - REST API contracts (`/api/health`, `/api/status`, root, and 404 handler)
 - Socket.IO connection and ping-pong latency checks
 - Real-time multi-client avatar position synchronization
 - Strict input validation and boundary clamping `[0, 2000]`
 - Room join/leave logic and voice participant management
 - Duplicate join and duplicate disconnect event protection
-- WebRTC audio signaling relays and offline target validation
-- High-churn reconnection and repeated connection resilience
+- Repeated connections and high-churn reconnection resilience
 - Real-time multi-tab avatar movement synchronization
 - Unexpected disconnections & abrupt transport drop recovery
 - Exhaustive invalid inputs and edge-case crash resistance
-- **Simultaneous Multi-User Virtual Office Interaction & Spatial Proximity Calculations** (Euclidean distance, audio volume rolloff, stereo pan, room isolation)
+- Simultaneous multi-user virtual office interaction & spatial proximity calculations
+- **WebRTC Audio Calling Full Handshake & Bidirectional Signaling (`call-user` $\rightarrow$ `accept-call` $\rightarrow$ `offer`/`answer` $\rightarrow$ `ice-candidate` $\rightarrow$ `mute-status` $\rightarrow$ `end-call`)**
+- **Mid-Call Abrupt Disconnection & Communication State Cleanup (instant peer teardown notification & zombie call prevention)**
+- **WebRTC Error Handling & Post-Reconnection Call Recovery (offline peer rejection, self-call blocking, call decline, and reconnection resumption)**
 
-### 4. Interactive Multi-Tab Visual Demo
-Open [http://localhost:5000/demo](http://localhost:5000/demo) in two or three separate browser tabs to test real-time avatar movement, proximity boundaries, live voice range badges (`🎙️ Audible`), and instant disconnect cleanup!
+### 4. Interactive Multi-Tab Visual & Audio Demo
+Open [http://localhost:5000/demo](http://localhost:5000/demo) in two or three separate browser tabs to test real-time avatar movement, audio calling between peers, incoming call banners, mute toggles, and instant disconnect cleanup!
 
 ---
 
