@@ -2,6 +2,13 @@
 const User = require("../models/User");
 const CommunicationSession = require("../models/CommunicationSession");
 
+const {
+  calculateDistance,
+  calculateAudioVolume,
+  calculateAudioPan,
+  getNearbyParticipants,
+} = require("../services/proximityService");
+
 const users = new Map();
 const activeSessions = new Map();
 
@@ -124,11 +131,11 @@ function registerSocketHandlers(io, socket) {
     const currentUser = users.get(socket.id);
     if (!currentUser) return;
 
-  const targetRoom = sanitizeRoomId(data.roomId || DEFAULT_ROOM);
-  const oldRoom = currentUser.roomId;
-  const previousUsername = currentUser.username;
+    const targetRoom = sanitizeRoomId(data.roomId || DEFAULT_ROOM);
+    const oldRoom = currentUser.roomId;
+    const previousUsername = currentUser.username;
 
-  if (data.username) {
+    if (data.username) {
       currentUser.username = sanitizeUsername(
         data.username,
         currentUser.username
@@ -157,9 +164,10 @@ function registerSocketHandlers(io, socket) {
     });
 
     if (
-    oldRoom !== targetRoom ||
-    previousUsername !== currentUser.username) {
-    socket.to(targetRoom).emit("participantJoined", currentUser);
+      oldRoom !== targetRoom ||
+      previousUsername !== currentUser.username
+    ) {
+      socket.to(targetRoom).emit("participantJoined", currentUser);
     }
 
     socket.broadcast.emit("userJoined", currentUser);
@@ -183,8 +191,6 @@ function registerSocketHandlers(io, socket) {
       return;
     }
 
-
-
     if (data.username) {
       currentUser.username = sanitizeUsername(
         data.username,
@@ -196,11 +202,19 @@ function registerSocketHandlers(io, socket) {
     }
 
     if (isFiniteNumber(data.x)) {
-      currentUser.x = clamp(data.x, MAP_BOUNDS.MIN_X, MAP_BOUNDS.MAX_X);
+      currentUser.x = clamp(
+        data.x,
+        MAP_BOUNDS.MIN_X,
+        MAP_BOUNDS.MAX_X
+      );
     }
 
     if (isFiniteNumber(data.y)) {
-      currentUser.y = clamp(data.y, MAP_BOUNDS.MIN_Y, MAP_BOUNDS.MAX_Y);
+      currentUser.y = clamp(
+        data.y,
+        MAP_BOUNDS.MIN_Y,
+        MAP_BOUNDS.MAX_Y
+      );
     }
 
     if (typeof data.color === "string" && data.color.trim()) {
@@ -244,6 +258,7 @@ function registerSocketHandlers(io, socket) {
 
   socket.on("getParticipants", (data = {}, callback) => {
     const roomId = sanitizeRoomId(data.roomId || DEFAULT_ROOM);
+
     const result = {
       roomId,
       participants: getRoomParticipants(roomId),
@@ -275,6 +290,7 @@ function registerSocketHandlers(io, socket) {
     }
 
     const currentUser = users.get(socket.id);
+
     if (!currentUser) {
       sendValidationError("User not found in active session");
       return;
@@ -285,6 +301,7 @@ function registerSocketHandlers(io, socket) {
       MAP_BOUNDS.MIN_X,
       MAP_BOUNDS.MAX_X
     );
+
     currentUser.y = clamp(
       position.y,
       MAP_BOUNDS.MIN_Y,
@@ -318,6 +335,7 @@ function registerSocketHandlers(io, socket) {
     });
   });
 
+  // WebRTC offer signaling
   socket.on("signal:offer", (data = {}) => {
     if (typeof data.targetId === "string" && data.offer) {
       io.to(data.targetId).emit("signal:offer", {
@@ -327,6 +345,50 @@ function registerSocketHandlers(io, socket) {
     }
   });
 
+  // Spatial proximity and nearby participants
+  socket.on("getNearbyUsers", (data = {}, callback) => {
+    try {
+      const currentUser = users.get(socket.id);
+      if (!currentUser) return;
+
+      const radius = isFiniteNumber(data.radius)
+        ? clamp(data.radius, 10, 2000)
+        : 300;
+
+      const roomParticipants = getRoomParticipants(currentUser.roomId);
+      const nearby = getNearbyParticipants(
+        currentUser,
+        roomParticipants,
+        radius
+      );
+
+      const result = {
+        roomId: currentUser.roomId,
+        radius,
+        nearby,
+      };
+
+      if (typeof callback === "function") {
+        callback(result);
+      } else {
+        socket.emit("nearbyUsers", result);
+      }
+    } catch (error) {
+      console.error(
+        `[PROXIMITY ERROR] ${socket.id}:`,
+        error.message
+      );
+    }
+  });
+
+  socket.on("clientDisconnect", () => {
+    console.log(
+      `[CLIENT DISCONNECT REQUEST] Client ${socket.id} requested disconnect`
+    );
+    socket.disconnect(true);
+  });
+
+  // WebRTC answer signaling
   socket.on("signal:answer", (data = {}) => {
     if (typeof data.targetId === "string" && data.answer) {
       io.to(data.targetId).emit("signal:answer", {
@@ -336,6 +398,7 @@ function registerSocketHandlers(io, socket) {
     }
   });
 
+  // WebRTC ICE candidate signaling
   socket.on("signal:ice-candidate", (data = {}) => {
     if (typeof data.targetId === "string" && data.candidate) {
       io.to(data.targetId).emit("signal:ice-candidate", {
@@ -398,7 +461,10 @@ function registerSocketHandlers(io, socket) {
       respond(result);
       io.to(participantId).emit("communicationSessionStarted", result);
     } catch (error) {
-      console.error("Failed to start communication session:", error.message);
+      console.error(
+        "Failed to start communication session:",
+        error.message
+      );
       respond({ error: "Failed to start communication session." });
     }
   });
@@ -429,7 +495,12 @@ function registerSocketHandlers(io, socket) {
           participantIds: socket.id,
           status: "active",
         },
-        { $set: { status: "ended", endedAt: new Date() } },
+        {
+          $set: {
+            status: "ended",
+            endedAt: new Date(),
+          },
+        },
         { returnDocument: "after" }
       );
 
@@ -454,7 +525,10 @@ function registerSocketHandlers(io, socket) {
         io.to(participantId).emit("communicationSessionEnded", result);
       }
     } catch (error) {
-      console.error("Failed to end communication session:", error.message);
+      console.error(
+        "Failed to end communication session:",
+        error.message
+      );
       respond({ error: "Failed to end communication session." });
     }
   });
@@ -476,12 +550,12 @@ function registerSocketHandlers(io, socket) {
       });
     }
 
-    // Keep the string ID for compatibility with the existing frontend.
     socket.broadcast.emit("userDisconnected", socket.id);
 
     socket.broadcast.emit("userLeft", {
       id: socket.id,
-      username: disconnectedUser?.username || `Guest-${socket.id.slice(0, 4)}`,
+      username:
+        disconnectedUser?.username || `Guest-${socket.id.slice(0, 4)}`,
       reason,
     });
 
@@ -498,7 +572,12 @@ function registerSocketHandlers(io, socket) {
           participantIds: socket.id,
           status: "active",
         },
-        { $set: { status: "ended", endedAt } }
+        {
+          $set: {
+            status: "ended",
+            endedAt,
+          },
+        }
       );
 
       for (const session of sessions) {
@@ -555,6 +634,10 @@ module.exports = {
   clamp,
   sanitizeUsername,
   sanitizeRoomId,
+  calculateDistance,
+  calculateAudioVolume,
+  calculateAudioPan,
+  getNearbyParticipants,
   DEFAULT_ROOM,
   MAP_BOUNDS,
 };
