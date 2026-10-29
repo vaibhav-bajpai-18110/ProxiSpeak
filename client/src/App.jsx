@@ -1,13 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { io } from "socket.io-client";
+import {
+  BACKEND_MAP_SIZE,
+  clampPosition,
+  isValidPosition,
+  mergeParticipant,
+  normalizeParticipant,
+  normalizeUsername,
+} from "./presence.js";
 import "./App.css";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api/health";
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || new URL(API_URL).origin;
 const API_TIMEOUT_MS = 8000;
-const BACKEND_MAP_SIZE = 2000;
 const USERNAME_STORAGE_KEY = "proxispeak.username";
-const ROOM_BOUNDS = { minX: 8, maxX: 92, minY: 12, maxY: 88 };
 const INITIAL_POSITION = { x: 49, y: 57 };
 
 function getSavedUsername() {
@@ -25,63 +31,6 @@ function getInitials(name) {
     .slice(0, 2)
     .map((part) => part[0]?.toUpperCase())
     .join("");
-}
-
-function clampPosition(position) {
-  return {
-    x: Math.min(ROOM_BOUNDS.maxX, Math.max(ROOM_BOUNDS.minX, position.x)),
-    y: Math.min(ROOM_BOUNDS.maxY, Math.max(ROOM_BOUNDS.minY, position.y)),
-  };
-}
-
-function isValidPosition(position) {
-  return (
-    position &&
-    Number.isFinite(position.x) &&
-    Number.isFinite(position.y)
-  );
-}
-
-function toOfficePosition(position) {
-  if (!isValidPosition(position)) return null;
-  return clampPosition({
-    x: (position.x / BACKEND_MAP_SIZE) * 100,
-    y: (position.y / BACKEND_MAP_SIZE) * 100,
-  });
-}
-
-function normalizeParticipant(participant, ownSocketId) {
-  if (!participant || typeof participant.id !== "string") return null;
-  const name = typeof participant.name === "string"
-    ? participant.name
-    : typeof participant.username === "string"
-      ? participant.username
-      : "Guest";
-  const backendPosition = Number.isFinite(participant.x) && Number.isFinite(participant.y)
-    ? toOfficePosition({ x: participant.x, y: participant.y })
-    : isValidPosition(participant.position)
-      ? clampPosition(participant.position)
-      : null;
-
-  return {
-    id: participant.id,
-    name,
-    status: participant.status === "offline" ? "offline" : "online",
-    isYou: participant.id === ownSocketId,
-    position: backendPosition,
-    color: typeof participant.color === "string" ? participant.color : "",
-  };
-}
-
-function mergeParticipant(participant, previous) {
-  if (!previous) return participant;
-  return {
-    ...previous,
-    ...participant,
-    name: participant.name && participant.name !== "Guest" ? participant.name : previous.name,
-    position: participant.position || previous.position || null,
-    color: participant.color || previous.color || "",
-  };
 }
 
 function App() {
@@ -319,7 +268,7 @@ function App() {
 
   async function enterOffice(event) {
     event.preventDefault();
-    const cleanUsername = username.trim().replace(/\s+/g, " ");
+    const cleanUsername = normalizeUsername(username);
     if (!cleanUsername || isJoining) return;
     setUsername(cleanUsername);
     try {
