@@ -30,9 +30,10 @@ server/
 │       └── proximityService.js # Spatial distance, audio volume attenuation & stereo pan calculations
 ├── .env                      # Environment configurations (PORT=5000)
 ├── .gitignore                # Git exclusion rules
+├── DAY14_TESTING_AND_BUG_REPORT.md # Day 14 comprehensive QA, multiplayer, reconnection & bug report
 ├── package.json              # Package manifest and scripts (start, test)
 ├── test-client.js            # Standalone Socket.IO test client
-├── verify.js                 # Automated 16-stage verification test runner
+├── verify.js                 # Automated 19-stage verification test runner
 └── README.md                 # Complete backend documentation
 ```
 

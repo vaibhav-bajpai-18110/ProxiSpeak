@@ -14,6 +14,7 @@ proxyspeak/
 │   │   ├── index.js          # Express server, REST APIs, & process safety nets
 │   │   ├── sockets/          # Real-time Socket.IO room, movement, proximity & WebRTC handlers
 │   │   └── services/         # Spatial proximity, audio rolloff & stereo panning calculations
+│   ├── DAY14_TESTING_AND_BUG_REPORT.md # Comprehensive Day 14 QA, multiplayer, reconnect & bug report
 │   ├── verify.js             # Automated 19-module integration test suite
 │   ├── package.json          # Dependencies and scripts (start, test)
 │   └── README.md             # Complete backend API, Socket.IO & proximity documentation
