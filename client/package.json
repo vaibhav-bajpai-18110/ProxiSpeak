@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "oxlint",
-    "test": "node --test src/presence.test.js",
+    "test": "node --test src/presence.test.js src/audioUtils.test.js src/profileUtils.test.js",
     "preview": "vite preview"
   },
   "dependencies": {
