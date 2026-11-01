@@ -1,16 +1,49 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   getAudioStatusLabel,
   getMicrophoneErrorMessage,
 } from "./audioUtils.js";
 
 const ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
+const PROXIMITY_RADIUS = 18;
+const OUTPUT_VOLUME_STORAGE_KEY = "proxispeak.audioOutputVolume";
 
-export function useOfficeAudio({ socket, started, isConnected, participants }) {
+function getSavedOutputVolume() {
+  try {
+    const storedVolume = window.localStorage.getItem(OUTPUT_VOLUME_STORAGE_KEY);
+    if (storedVolume === null) return 1;
+    const savedVolume = Number(storedVolume);
+    return Number.isFinite(savedVolume) ? Math.min(1, Math.max(0, savedVolume)) : 1;
+  } catch {
+    return 1;
+  }
+}
+
+function isWithinAudioRange(participant, localPosition, roomId) {
+  if (!participant?.position || !localPosition) return false;
+  if ((participant.roomId || "main-office") !== roomId) return false;
+  const distance = Math.hypot(
+    participant.position.x - localPosition.x,
+    participant.position.y - localPosition.y,
+  );
+  return distance <= PROXIMITY_RADIUS;
+}
+
+function getProximityVolume(participant, localPosition) {
+  if (!participant?.position || !localPosition) return 0;
+  const distance = Math.hypot(
+    participant.position.x - localPosition.x,
+    participant.position.y - localPosition.y,
+  );
+  return Math.max(0.15, 1 - distance / PROXIMITY_RADIUS);
+}
+
+export function useOfficeAudio({ socket, started, isConnected, participants, localPosition, roomId }) {
   const [microphoneStatus, setMicrophoneStatus] = useState("off");
   const [microphoneError, setMicrophoneError] = useState("");
   const [audioError, setAudioError] = useState("");
   const [isMuted, setIsMuted] = useState(false);
+  const [outputVolume, setOutputVolumeState] = useState(getSavedOutputVolume);
   const [peerStatuses, setPeerStatuses] = useState({});
   const [remoteStreams, setRemoteStreams] = useState({});
   const localStreamRef = useRef(null);
@@ -19,15 +52,43 @@ export function useOfficeAudio({ socket, started, isConnected, participants }) {
   const startedRef = useRef(started);
   const connectedRef = useRef(isConnected);
   const mutedRef = useRef(isMuted);
-  const participantsRef = useRef(participants);
+  const nearbyParticipantIdsRef = useRef(new Set());
+  const nearbyParticipants = useMemo(() => participants.filter((participant) => (
+    !participant.isYou &&
+    participant.status === "online" &&
+    isWithinAudioRange(participant, localPosition, roomId)
+  )), [participants, localPosition, roomId]);
+  const nearbyParticipantIds = useMemo(
+    () => nearbyParticipants.map((participant) => participant.id),
+    [nearbyParticipants],
+  );
+  const remoteVolumes = useMemo(
+    () => Object.fromEntries(nearbyParticipants.map((participant) => [
+      participant.id,
+      getProximityVolume(participant, localPosition) * outputVolume,
+    ])),
+    [nearbyParticipants, localPosition, outputVolume],
+  );
+
+  const setOutputVolume = useCallback((value) => {
+    const nextVolume = Number(value);
+    if (!Number.isFinite(nextVolume)) return;
+    const normalizedVolume = Math.min(1, Math.max(0, nextVolume));
+    setOutputVolumeState(normalizedVolume);
+    try {
+      window.localStorage.setItem(OUTPUT_VOLUME_STORAGE_KEY, String(normalizedVolume));
+    } catch {
+      // Keep the output level for this session when browser storage is unavailable.
+    }
+  }, []);
 
   useEffect(() => {
     socketRef.current = socket;
     startedRef.current = started;
     connectedRef.current = isConnected;
     mutedRef.current = isMuted;
-    participantsRef.current = participants;
-  }, [socket, started, isConnected, isMuted, participants]);
+    nearbyParticipantIdsRef.current = new Set(nearbyParticipantIds);
+  }, [socket, started, isConnected, isMuted, nearbyParticipantIds]);
 
   const updatePeerStatus = useCallback((peerId, status) => {
     setPeerStatuses((current) => ({ ...current, [peerId]: status }));
@@ -77,7 +138,7 @@ export function useOfficeAudio({ socket, started, isConnected, participants }) {
 
   const ensurePeerConnection = useCallback((peerId) => {
     const activeSocket = socketRef.current;
-    if (!activeSocket?.connected || !peerId || peerId === activeSocket.id || !window.RTCPeerConnection) return null;
+    if (!activeSocket?.connected || !peerId || peerId === activeSocket.id || !window.RTCPeerConnection || !nearbyParticipantIdsRef.current.has(peerId)) return null;
 
     const existing = peersRef.current.get(peerId);
     if (existing) return existing;
@@ -128,7 +189,7 @@ export function useOfficeAudio({ socket, started, isConnected, participants }) {
 
     pc.onnegotiationneeded = async () => {
       const currentSocket = socketRef.current;
-      if (!currentSocket?.connected || !connectedRef.current) return;
+      if (!currentSocket?.connected || !connectedRef.current || !nearbyParticipantIdsRef.current.has(peerId)) return;
       try {
         entry.makingOffer = true;
         await pc.setLocalDescription();
@@ -150,7 +211,7 @@ export function useOfficeAudio({ socket, started, isConnected, participants }) {
   }, [updatePeerStatus]);
 
   const handleOffer = useCallback(async ({ senderId, offer } = {}) => {
-    if (!senderId || !offer || !connectedRef.current) return;
+    if (!senderId || !offer || !connectedRef.current || !nearbyParticipantIdsRef.current.has(senderId)) return;
     const entry = ensurePeerConnection(senderId);
     if (!entry) return;
     const { pc } = entry;
@@ -180,7 +241,7 @@ export function useOfficeAudio({ socket, started, isConnected, participants }) {
   }, [ensurePeerConnection, updatePeerStatus]);
 
   const handleAnswer = useCallback(async ({ senderId, answer } = {}) => {
-    if (!senderId || !answer) return;
+    if (!senderId || !answer || !nearbyParticipantIdsRef.current.has(senderId)) return;
     const entry = peersRef.current.get(senderId);
     if (!entry) return;
     try {
@@ -198,7 +259,7 @@ export function useOfficeAudio({ socket, started, isConnected, participants }) {
   }, [updatePeerStatus]);
 
   const handleIceCandidate = useCallback(async ({ senderId, candidate } = {}) => {
-    if (!senderId || !candidate || !connectedRef.current) return;
+    if (!senderId || !candidate || !connectedRef.current || !nearbyParticipantIdsRef.current.has(senderId)) return;
     const entry = ensurePeerConnection(senderId);
     if (!entry || entry.ignoreOffer) return;
     if (!entry.pc.remoteDescription) {
@@ -234,15 +295,15 @@ export function useOfficeAudio({ socket, started, isConnected, participants }) {
       return;
     }
 
+    const nearbyIds = new Set(nearbyParticipantIds);
+    for (const peerId of peersRef.current.keys()) {
+      if (!nearbyIds.has(peerId)) removePeer(peerId);
+    }
     const stream = localStreamRef.current;
     if (!stream) return;
     for (const track of stream.getAudioTracks()) track.enabled = !mutedRef.current;
-    for (const participant of participants) {
-      if (participant.id !== socket.id && participant.status === "online") {
-        ensurePeerConnection(participant.id);
-      }
-    }
-  }, [started, isConnected, socket, participants, closeAllPeers, ensurePeerConnection]);
+    for (const participant of nearbyParticipants) ensurePeerConnection(participant.id);
+  }, [started, isConnected, socket, nearbyParticipantIds, nearbyParticipants, closeAllPeers, removePeer, ensurePeerConnection]);
 
   const requestMicrophone = useCallback(async () => {
     if (microphoneStatus === "requesting") return;
@@ -288,11 +349,7 @@ export function useOfficeAudio({ socket, started, isConnected, participants }) {
       mutedRef.current = false;
       setIsMuted(false);
       setMicrophoneStatus("ready");
-      for (const participant of participantsRef.current) {
-        if (participant.id !== socketRef.current.id && participant.status === "online") {
-          ensurePeerConnection(participant.id);
-        }
-      }
+      for (const peerId of nearbyParticipantIdsRef.current) ensurePeerConnection(peerId);
       for (const track of audioTracks) {
         track.addEventListener("ended", () => {
           setMicrophoneStatus("unavailable");
@@ -321,11 +378,7 @@ export function useOfficeAudio({ socket, started, isConnected, participants }) {
       void requestMicrophone();
       return;
     }
-    for (const participant of participantsRef.current) {
-      if (participant.id !== socketRef.current?.id && participant.status === "online") {
-        ensurePeerConnection(participant.id);
-      }
-    }
+    for (const peerId of nearbyParticipantIdsRef.current) ensurePeerConnection(peerId);
   }, [closeAllPeers, ensurePeerConnection, requestMicrophone]);
 
   const leaveAudio = useCallback(() => {
@@ -339,14 +392,15 @@ export function useOfficeAudio({ socket, started, isConnected, participants }) {
     setIsMuted(false);
   }, [closeAllPeers]);
 
-  const onlinePeerCount = participants.filter((participant) => !participant.isYou && participant.status === "online").length;
+  const onlinePeerCount = participants.filter((participant) => !participant.isYou && participant.status === "online" && (participant.roomId || "main-office") === roomId).length;
+  const nearbyPeerCount = nearbyParticipants.length;
   const connectedPeerCount = Object.values(peerStatuses).filter((status) => status === "connected").length;
   const hasFailedPeer = Object.values(peerStatuses).some((status) => status === "failed");
   const statusLabel = getAudioStatusLabel({
     microphoneStatus,
     isMuted,
     peerStatuses,
-    onlinePeerCount,
+    onlinePeerCount: nearbyPeerCount,
     isConnected: started && isConnected,
   });
 
@@ -362,9 +416,15 @@ export function useOfficeAudio({ socket, started, isConnected, participants }) {
     microphoneError,
     audioError,
     isMuted,
+    outputVolume,
+    setOutputVolume,
     peerStatuses,
     remoteStreams,
+    remoteVolumes,
     onlinePeerCount,
+    nearbyPeerCount,
+    nearbyParticipantIds,
+    proximityRadius: PROXIMITY_RADIUS,
     connectedPeerCount,
     hasFailedPeer,
     statusLabel,
