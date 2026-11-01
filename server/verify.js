@@ -32,6 +32,23 @@ async function postJson(url, data, retries = 3) {
   }
 }
 
+async function putJson(url, data, retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const res = await fetch(url, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      const text = await res.text();
+      return { status: res.status, body: text, headers: res.headers };
+    } catch (err) {
+      if (i === retries - 1) throw err;
+      await new Promise((r) => setTimeout(r, 400));
+    }
+  }
+}
+
 // Test 1: Socket.IO Connection Acknowledgment & Ping-Pong
 async function testSocketConnectionAndPingPong(serverUrl) {
   return new Promise((resolve, reject) => {
@@ -1471,6 +1488,136 @@ async function testMultiRoomIsolationAndCallTeardownOnSwitch(serverUrl) {
   });
 }
 
+// Test 23: Profile REST API, Validation Errors & Real-Time Socket Updates
+async function testProfileApiAndRealtimeProfileSync(serverUrl) {
+  return new Promise(async (resolve, reject) => {
+    const client1 = io(serverUrl, { transports: ["websocket", "polling"], timeout: 6000 });
+    const client2 = io(serverUrl, { transports: ["websocket", "polling"], timeout: 6000 });
+
+    const timeout = setTimeout(() => {
+      client1.disconnect();
+      client2.disconnect();
+      reject(new Error("Profile test timed out"));
+    }, 10000);
+
+    try {
+      await Promise.all([
+        new Promise((res, rej) => { client1.once("connect", res); client1.once("connect_error", rej); }),
+        new Promise((res, rej) => { client2.once("connect", res); client2.once("connect_error", rej); }),
+      ]);
+
+      // 1. Missing userId error on GET /api/profile
+      const missingIdRes = await checkUrl(`${serverUrl}/api/profile`);
+      const missingIdJson = JSON.parse(missingIdRes.body);
+      const missingIdHandled = missingIdRes.status === 400 && missingIdJson.status === "error" && typeof missingIdJson.message === "string";
+
+      // 2. Non-existent profile 404
+      const notFoundRes = await checkUrl(`${serverUrl}/api/profile/unknown_user_999`);
+      const notFoundJson = JSON.parse(notFoundRes.body);
+      const notFoundHandled = notFoundRes.status === 404 && notFoundJson.status === "error" && notFoundJson.code === "PROFILE_NOT_FOUND";
+
+      // 3. Validation rejection on PUT /api/profile/:userId (invalid hex color)
+      const invalidColorRes = await putJson(`${serverUrl}/api/profile/user_alice`, {
+        username: "Alice",
+        color: "not-a-hex-color",
+      });
+      const invalidColorJson = JSON.parse(invalidColorRes.body);
+      const invalidColorHandled = invalidColorRes.status === 400 && invalidColorJson.status === "error" && invalidColorJson.message.includes("valid hex color");
+
+      // 4. Validation rejection on PUT /api/profile/:userId (invalid status)
+      const invalidStatusRes = await putJson(`${serverUrl}/api/profile/user_alice`, {
+        username: "Alice",
+        color: "#3B82F6",
+        status: "flying_in_space",
+      });
+      const invalidStatusJson = JSON.parse(invalidStatusRes.body);
+      const invalidStatusHandled = invalidStatusRes.status === 400 && invalidStatusJson.status === "error" && invalidStatusJson.message.includes("Status must be one of");
+
+      // 5. Successful Profile creation/update via PUT /api/profile/user_alice
+      const validPutRes = await putJson(`${serverUrl}/api/profile/user_alice`, {
+        username: "Alice Wonder",
+        color: "#10B981",
+        status: "busy",
+      });
+      const validPutJson = JSON.parse(validPutRes.body);
+      const putSuccess = validPutRes.status === 200 &&
+        validPutJson.status === "success" &&
+        validPutJson.profile?.username === "Alice Wonder" &&
+        validPutJson.profile?.displayName === "Alice Wonder" &&
+        validPutJson.profile?.color === "#10B981" &&
+        validPutJson.profile?.avatarColor === "#10B981" &&
+        validPutJson.profile?.status === "busy" &&
+        validPutJson.profile?.availability === "busy";
+
+      // 6. Query saved profile via GET /api/profile/user_alice
+      const getProfileRes = await checkUrl(`${serverUrl}/api/profile/user_alice`);
+      const getProfileJson = JSON.parse(getProfileRes.body);
+      const getSuccess = getProfileRes.status === 200 &&
+        getProfileJson.status === "success" &&
+        getProfileJson.profile?.username === "Alice Wonder";
+
+      // 7. Real-Time Socket.IO profile update broadcast
+      let client2ReceivedBroadcast = null;
+      const broadcastPromise = new Promise((res) => {
+        client2.once("userProfileUpdated", (data) => {
+          client2ReceivedBroadcast = data;
+          res();
+        });
+      });
+
+      let client1CallbackSuccess = false;
+      await new Promise((res) => {
+        client1.emit("updateProfile", {
+          username: "Bob Dylan",
+          color: "#8B5CF6",
+          status: "dnd",
+        }, (response) => {
+          if (response?.status === "success" && response?.profile?.username === "Bob Dylan") {
+            client1CallbackSuccess = true;
+          }
+          res();
+        });
+      });
+
+      await Promise.race([broadcastPromise, new Promise((r) => setTimeout(r, 600))]);
+
+      // 8. Socket.IO validation error test
+      let socketValidationErrorMessage = null;
+      await new Promise((res) => {
+        client1.emit("updateProfile", {
+          status: "sleeping",
+        }, (errResponse) => {
+          if (errResponse?.status === "error") {
+            socketValidationErrorMessage = errResponse.message;
+          }
+          res();
+        });
+      });
+
+      clearTimeout(timeout);
+      client1.disconnect();
+      client2.disconnect();
+
+      resolve({
+        missingIdHandled,
+        notFoundHandled,
+        invalidColorHandled,
+        invalidStatusHandled,
+        putSuccess,
+        getSuccess,
+        socketProfileBroadcasted: Boolean(client2ReceivedBroadcast && client2ReceivedBroadcast.username === "Bob Dylan" && client2ReceivedBroadcast.status === "dnd"),
+        client1CallbackSuccess,
+        socketValidationHandled: Boolean(socketValidationErrorMessage && socketValidationErrorMessage.includes("Status must be one of")),
+      });
+    } catch (err) {
+      clearTimeout(timeout);
+      client1.disconnect();
+      client2.disconnect();
+      reject(err);
+    }
+  });
+}
+
 async function runTest() {
   let hasErrors = false;
   console.log("Starting ProxiSpeak server for verification...");
@@ -1797,6 +1944,33 @@ async function runTest() {
       hasErrors = true;
     }
 
+    // 23. Profile REST API, Consistent Validation Errors & Real-Time Socket Updates
+    console.log("\n--- [23] Testing Profile REST API, Validation Errors & Real-Time Sync ---");
+    const profileResult = await testProfileApiAndRealtimeProfileSync("http://localhost:5000");
+    if (
+      profileResult.missingIdHandled &&
+      profileResult.notFoundHandled &&
+      profileResult.invalidColorHandled &&
+      profileResult.invalidStatusHandled &&
+      profileResult.putSuccess &&
+      profileResult.getSuccess &&
+      profileResult.socketProfileBroadcasted &&
+      profileResult.client1CallbackSuccess &&
+      profileResult.socketValidationHandled
+    ) {
+      console.log("--> PASS: Missing user ID gracefully returns 400 Bad Request with descriptive message.");
+      console.log("--> PASS: Non-existent profile query returns 404 with structured JSON error payload.");
+      console.log("--> PASS: Invalid hex color rejected with 400 status and frontend-friendly validation error.");
+      console.log("--> PASS: Invalid availability status rejected with 400 status ('Status must be one of...').");
+      console.log("--> PASS: PUT /api/profile/:userId successfully saves profile with displayName, avatarColor, availability.");
+      console.log("--> PASS: GET /api/profile/:userId successfully retrieves persisted profile.");
+      console.log("--> PASS: Socket updateProfile updates profile and broadcasts userProfileUpdated to peers in real-time.");
+      console.log("--> PASS: Socket profile validation rejection provides consistent { status: 'error', message } structure.");
+    } else {
+      console.error("--> FAIL: Profile API and real-time sync test failed:", profileResult);
+      hasErrors = true;
+    }
+
   } catch (err) {
     console.error("\n[TEST RUNNER EXCEPTION]:", err.message || err);
     hasErrors = true;
@@ -1810,7 +1984,7 @@ async function runTest() {
       console.error("\n❌ VERIFICATION FAILED: One or more tests did not pass.\n");
       process.exit(1);
     } else {
-      console.log("\n✅ ALL TESTS PASSED: All 22 backend modules, room lifecycle, capacity enforcement, isolation, and WebRTC verified.\n");
+      console.log("\n✅ ALL TESTS PASSED: All 23 backend modules, room lifecycle, capacity enforcement, profile sync, and WebRTC verified.\n");
       process.exit(0);
     }
   }
