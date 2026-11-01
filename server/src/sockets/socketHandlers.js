@@ -12,7 +12,6 @@ const {
 const users = new Map();
 const activeSessions = new Map();
 
-// WebRTC call state
 const activeAudioCalls = new Map();
 const userCallMap = new Map();
 
@@ -80,6 +79,7 @@ function getCallPeers(socketId) {
 
 function cleanupUserCalls(socketId, io, reason = "peer_disconnected") {
   const callIds = userCallMap.get(socketId);
+
   if (!callIds || callIds.size === 0) {
     userCallMap.delete(socketId);
     return [];
@@ -137,22 +137,38 @@ const MAP_BOUNDS = {
 
 const DEFAULT_ROOM = "main-office";
 
-const AVATAR_COLORS = [
-  "#3B82F6",
-  "#10B981",
-  "#F59E0B",
-  "#EF4444",
-  "#8B5CF6",
-  "#EC4899",
-  "#06B6D4",
-  "#F97316",
-];
+const rooms = new Map();
 
-function getRandomColor() {
-  return AVATAR_COLORS[
-    Math.floor(Math.random() * AVATAR_COLORS.length)
-  ];
-}
+const DEFAULT_ROOMS = [
+  {
+    id: "main-office",
+    name: "Main Office",
+    description: "Central virtual workspace",
+    maxParticipants: 50,
+    isDefault: true,
+  },
+  {
+    id: "meeting-room-a",
+    name: "Meeting Room A",
+    description: "Focus and presentation room",
+    maxParticipants: 10,
+    isDefault: false,
+  },
+  {
+    id: "meeting-room-b",
+    name: "Meeting Room B",
+    description: "Collaborative breakout space",
+    maxParticipants: 10,
+    isDefault: false,
+  },
+  {
+    id: "lounge",
+    name: "Lounge / Cafeteria",
+    description: "Casual watercooler chat",
+    maxParticipants: 25,
+    isDefault: false,
+  },
+];
 
 function isFiniteNumber(value) {
   return typeof value === "number" && Number.isFinite(value);
@@ -172,7 +188,12 @@ function sanitizeUsername(input, defaultName) {
 function sanitizeRoomId(roomId) {
   if (typeof roomId !== "string") return DEFAULT_ROOM;
 
-  const clean = roomId.trim().toLowerCase().replace(/[^a-z0-9-_]/g, "");
+  const clean = roomId
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9-_]/g, "");
+
   return clean ? clean.slice(0, 50) : DEFAULT_ROOM;
 }
 
@@ -180,6 +201,125 @@ function getRoomParticipants(roomId) {
   return Array.from(users.values()).filter(
     (user) => user.roomId === roomId
   );
+}
+
+function initDefaultRooms() {
+  rooms.clear();
+
+  DEFAULT_ROOMS.forEach((room) => {
+    rooms.set(room.id, {
+      ...room,
+      isPrivate: false,
+      createdBy: "system",
+      createdAt: new Date().toISOString(),
+    });
+  });
+}
+
+initDefaultRooms();
+
+function getRoomsList() {
+  return Array.from(rooms.values()).map((room) => ({
+    ...room,
+    currentParticipants: getRoomParticipants(room.id).length,
+  }));
+}
+
+function getRoomMeta(roomId) {
+  if (rooms.has(roomId)) {
+    return rooms.get(roomId);
+  }
+
+  const autoRoom = {
+    id: roomId,
+    name: roomId
+      .replace(/[-_]/g, " ")
+      .replace(/\b\w/g, (char) => char.toUpperCase()),
+    description: "Dynamic office room",
+    maxParticipants: 25,
+    isPrivate: false,
+    isDefault: roomId === DEFAULT_ROOM,
+    createdBy: "dynamic",
+    createdAt: new Date().toISOString(),
+  };
+
+  rooms.set(roomId, autoRoom);
+  return autoRoom;
+}
+
+function createRoom(
+  {
+    roomId,
+    name,
+    description,
+    maxParticipants,
+    isPrivate = false,
+  } = {},
+  creatorId = "system"
+) {
+  const sanitizedId = sanitizeRoomId(
+    roomId || name || `room-${Date.now()}`
+  );
+
+  const sanitizedName =
+    typeof name === "string" && name.trim()
+      ? name.trim().slice(0, 50)
+      : sanitizedId;
+
+  const sanitizedDescription =
+    typeof description === "string"
+      ? description.trim().slice(0, 200)
+      : "";
+
+  const maxCapacity =
+    typeof maxParticipants === "number" &&
+    Number.isFinite(maxParticipants) &&
+    maxParticipants > 0
+      ? Math.min(100, Math.max(2, Math.round(maxParticipants)))
+      : 25;
+
+  if (rooms.has(sanitizedId)) {
+    return {
+      success: false,
+      error: "Room already exists",
+      roomId: sanitizedId,
+    };
+  }
+
+  const room = {
+    id: sanitizedId,
+    name: sanitizedName,
+    description: sanitizedDescription,
+    maxParticipants: maxCapacity,
+    isPrivate: Boolean(isPrivate),
+    isDefault: sanitizedId === DEFAULT_ROOM,
+    createdBy: creatorId,
+    createdAt: new Date().toISOString(),
+  };
+
+  rooms.set(sanitizedId, room);
+
+  return {
+    success: true,
+    room,
+  };
+}
+
+const AVATAR_COLORS = [
+  "#3B82F6",
+  "#10B981",
+  "#F59E0B",
+  "#EF4444",
+  "#8B5CF6",
+  "#EC4899",
+  "#06B6D4",
+  "#F97316",
+];
+
+function getRandomColor() {
+  return AVATAR_COLORS[
+    Math.floor(Math.random() * AVATAR_COLORS.length)
+  ];
 }
 
 async function saveUser(user) {
@@ -196,6 +336,85 @@ async function saveUser(user) {
   } catch (error) {
     console.error("Failed to save user:", error.message);
   }
+}
+
+function executeRoomJoin(socket, targetRoomId, newUsername, io) {
+  const user = users.get(socket.id);
+  if (!user) return false;
+
+  const targetRoom = sanitizeRoomId(targetRoomId || DEFAULT_ROOM);
+  const targetUsername = newUsername
+    ? sanitizeUsername(newUsername, user.username)
+    : user.username;
+
+  if (user.roomId === targetRoom) {
+    const usernameChanged = user.username !== targetUsername;
+
+    user.username = targetUsername;
+    users.set(socket.id, user);
+
+    if (usernameChanged) {
+      void saveUser(user);
+      socket.to(targetRoom).emit("participantJoined", user);
+      socket.broadcast.emit("userJoined", user);
+    }
+
+    socket.emit("roomParticipants", {
+      roomId: targetRoom,
+      participants: getRoomParticipants(targetRoom),
+    });
+
+    return true;
+  }
+
+  const roomMeta = getRoomMeta(targetRoom);
+  const currentCount = getRoomParticipants(targetRoom).length;
+
+  if (currentCount >= roomMeta.maxParticipants) {
+    socket.emit("error:room", {
+      message: "Room is full",
+      roomId: targetRoom,
+      maxParticipants: roomMeta.maxParticipants,
+      currentCount,
+    });
+
+    return false;
+  }
+
+  const oldRoom = user.roomId || DEFAULT_ROOM;
+
+  cleanupUserCalls(socket.id, io, "room_switched");
+
+  socket.leave(oldRoom);
+
+  socket.to(oldRoom).emit("participantLeft", {
+    id: socket.id,
+    username: user.username,
+    roomId: oldRoom,
+    reason: "room_switched",
+  });
+
+  user.roomId = targetRoom;
+  user.username = targetUsername;
+  users.set(socket.id, user);
+
+  socket.join(targetRoom);
+  void saveUser(user);
+
+  console.log(
+    `[ROOM SWITCH] User ${socket.id} moved from ${oldRoom} to ${targetRoom}`
+  );
+
+  socket.emit("roomParticipants", {
+    roomId: targetRoom,
+    participants: getRoomParticipants(targetRoom),
+  });
+
+  socket.to(targetRoom).emit("participantJoined", user);
+  socket.broadcast.emit("userJoined", user);
+  io.emit("roomListUpdated", getRoomsList());
+
+  return true;
 }
 
 function registerSocketHandlers(io, socket) {
@@ -235,6 +454,8 @@ function registerSocketHandlers(io, socket) {
     participants: getRoomParticipants(DEFAULT_ROOM),
   });
 
+  socket.emit("roomList", getRoomsList());
+
   socket.broadcast.emit("userJoined", user);
   socket.to(DEFAULT_ROOM).emit("participantJoined", user);
 
@@ -244,58 +465,115 @@ function registerSocketHandlers(io, socket) {
     socket.emit("error:validation", payload);
   }
 
-  function joinRoom(data = {}) {
-    const currentUser = users.get(socket.id);
-    if (!currentUser) return;
-
-    const targetRoom = sanitizeRoomId(data.roomId || DEFAULT_ROOM);
-    const oldRoom = currentUser.roomId;
-    const previousUsername = currentUser.username;
-
-    if (data.username) {
-      currentUser.username = sanitizeUsername(
-        data.username,
-        currentUser.username
-      );
-    }
-
-    if (oldRoom !== targetRoom) {
-      socket.leave(oldRoom);
-
-      socket.to(oldRoom).emit("participantLeft", {
-        id: socket.id,
-        username: currentUser.username,
-        roomId: oldRoom,
-      });
-
-      socket.join(targetRoom);
-      currentUser.roomId = targetRoom;
-    }
-
-    users.set(socket.id, currentUser);
-    void saveUser(currentUser);
-
-    socket.emit("roomParticipants", {
-      roomId: targetRoom,
-      participants: getRoomParticipants(targetRoom),
-    });
-
-    if (
-      oldRoom !== targetRoom ||
-      previousUsername !== currentUser.username
-    ) {
-      socket.to(targetRoom).emit("participantJoined", currentUser);
-    }
-
-    socket.broadcast.emit("userJoined", currentUser);
-  }
-
-  socket.on("joinRoom", (data = {}) => {
+  socket.on("createRoom", (data = {}, callback) => {
     try {
-      joinRoom(data);
+      if (!data || typeof data !== "object" || Array.isArray(data)) {
+        const result = {
+          success: false,
+          message: "Invalid payload for createRoom",
+        };
+
+        if (typeof callback === "function") callback(result);
+        else socket.emit("error:room", result);
+
+        return;
+      }
+
+      const result = createRoom(data, socket.id);
+
+      if (!result.success) {
+        if (typeof callback === "function") callback(result);
+        else socket.emit("error:room", result);
+
+        return;
+      }
+
+      socket.emit("roomCreated", result.room);
+
+      if (typeof callback === "function") {
+        callback({ success: true, room: result.room });
+      }
+
+      io.emit("roomListUpdated", getRoomsList());
     } catch (error) {
-      console.error("Join room failed:", error.message);
-      sendValidationError("Failed to join room");
+      console.error(`[CREATE ROOM ERROR] ${socket.id}:`, error.message);
+
+      const result = {
+        success: false,
+        message: "Internal error creating room",
+      };
+
+      if (typeof callback === "function") callback(result);
+      else socket.emit("error:room", result);
+    }
+  });
+
+  socket.on("getRooms", (callback) => {
+    const list = getRoomsList();
+
+    if (typeof callback === "function") {
+      callback({ success: true, rooms: list });
+    } else {
+      socket.emit("roomList", list);
+    }
+  });
+
+  socket.on("joinRoom", (data = {}, callback) => {
+    try {
+      let targetRoomId = DEFAULT_ROOM;
+      let targetUsername = null;
+
+      if (data && typeof data === "object" && !Array.isArray(data)) {
+        targetRoomId = data.roomId || DEFAULT_ROOM;
+        targetUsername = data.username || null;
+      } else if (typeof data === "string") {
+        targetRoomId = data;
+      } else {
+        const result = {
+          success: false,
+          message: "Invalid joinRoom payload",
+        };
+
+        if (typeof callback === "function") callback(result);
+        else socket.emit("error:validation", result);
+
+        return;
+      }
+
+      const success = executeRoomJoin(
+        socket,
+        targetRoomId,
+        targetUsername,
+        io
+      );
+
+      if (typeof callback === "function") {
+        if (!success) {
+          callback({
+            success: false,
+            message: "Room join failed",
+            roomId: targetRoomId,
+          });
+        } else {
+          const finalRoom = sanitizeRoomId(targetRoomId);
+
+          callback({
+            success: true,
+            roomId: finalRoom,
+            participants: getRoomParticipants(finalRoom),
+          });
+        }
+      }
+    } catch (error) {
+      console.error(`[JOIN ROOM ERROR] ${socket.id}:`, error.message);
+
+      const result = {
+        success: false,
+        message: "Failed to join room",
+      };
+
+      if (typeof callback === "function") callback(result);
+      else socket.emit("error:validation", result);
     }
   });
 
@@ -303,8 +581,12 @@ function registerSocketHandlers(io, socket) {
     const currentUser = users.get(socket.id);
     if (!currentUser) return;
 
-    if (data.roomId) {
-      joinRoom(data);
+    if (
+      data &&
+      typeof data === "object" &&
+      data.roomId
+    ) {
+      executeRoomJoin(socket, data.roomId, data.username, io);
       return;
     }
 
@@ -313,6 +595,7 @@ function registerSocketHandlers(io, socket) {
         data.username,
         currentUser.username
       );
+
       users.set(socket.id, currentUser);
       void saveUser(currentUser);
       socket.broadcast.emit("userJoined", currentUser);
@@ -337,16 +620,55 @@ function registerSocketHandlers(io, socket) {
     if (typeof data.color === "string" && data.color.trim()) {
       currentUser.color = data.color.trim();
     }
+
+    users.set(socket.id, currentUser);
   });
 
-  socket.on("leaveRoom", (data = {}) => {
+  socket.on("leaveRoom", (data = {}, callback) => {
     try {
       const currentUser = users.get(socket.id);
-      if (!currentUser) return;
+
+      if (!currentUser) {
+        if (typeof callback === "function") {
+          callback({ success: false, message: "User not found" });
+        }
+        return;
+      }
+
+      const roomPayload =
+        data && typeof data === "object" ? data : {};
 
       const roomToLeave = sanitizeRoomId(
-        data.roomId || currentUser.roomId
+        roomPayload.roomId || currentUser.roomId
       );
+
+      if (currentUser.roomId !== roomToLeave) {
+        const result = {
+          success: false,
+          message: "User is not in the requested room",
+          currentRoom: currentUser.roomId,
+        };
+
+        if (typeof callback === "function") callback(result);
+        else socket.emit("error:room", result);
+
+        return;
+      }
+
+      if (roomToLeave === DEFAULT_ROOM) {
+        const result = {
+          success: false,
+          message: "Cannot leave the default room",
+          currentRoom: DEFAULT_ROOM,
+        };
+
+        if (typeof callback === "function") callback(result);
+        else socket.emit("error:room", result);
+
+        return;
+      }
+
+      cleanupUserCalls(socket.id, io, "room_left");
 
       socket.leave(roomToLeave);
 
@@ -354,22 +676,35 @@ function registerSocketHandlers(io, socket) {
         id: socket.id,
         username: currentUser.username,
         roomId: roomToLeave,
+        reason: "user_left_room",
       });
 
-      if (currentUser.roomId === roomToLeave) {
-        currentUser.roomId = DEFAULT_ROOM;
-        socket.join(DEFAULT_ROOM);
-        users.set(socket.id, currentUser);
+      currentUser.roomId = DEFAULT_ROOM;
+      users.set(socket.id, currentUser);
 
-        socket.emit("roomParticipants", {
-          roomId: DEFAULT_ROOM,
-          participants: getRoomParticipants(DEFAULT_ROOM),
+      socket.join(DEFAULT_ROOM);
+
+      socket.emit("roomParticipants", {
+        roomId: DEFAULT_ROOM,
+        participants: getRoomParticipants(DEFAULT_ROOM),
+      });
+
+      socket.to(DEFAULT_ROOM).emit("participantJoined", currentUser);
+      io.emit("roomListUpdated", getRoomsList());
+
+      if (typeof callback === "function") {
+        callback({
+          success: true,
+          leftRoom: roomToLeave,
+          currentRoom: DEFAULT_ROOM,
         });
-
-        socket.to(DEFAULT_ROOM).emit("participantJoined", currentUser);
       }
     } catch (error) {
-      console.error("Leave room failed:", error.message);
+      console.error(`[LEAVE ROOM ERROR] ${socket.id}:`, error.message);
+
+      if (typeof callback === "function") {
+        callback({ success: false, message: error.message });
+      }
     }
   });
 
@@ -385,7 +720,6 @@ function registerSocketHandlers(io, socket) {
     else socket.emit("roomParticipants", result);
   });
 
-  // Position updates and broadcasting
   function handlePosition(position) {
     if (
       !position ||
@@ -434,6 +768,7 @@ function registerSocketHandlers(io, socket) {
       color: currentUser.color,
     };
 
+    socket.to(currentUser.roomId).emit("roomPositionUpdated", payload);
     socket.broadcast.emit("userPositionUpdated", payload);
     socket.broadcast.emit("userMoved", payload);
   }
@@ -441,7 +776,6 @@ function registerSocketHandlers(io, socket) {
   socket.on("updatePosition", handlePosition);
   socket.on("userMoved", handlePosition);
 
-  // WebRTC call request
   const handleCallUser = ({
     targetId,
     userToCall,
@@ -475,9 +809,17 @@ function registerSocketHandlers(io, socket) {
     }
 
     const caller = users.get(socket.id);
-    const callerName = caller
-      ? caller.username
-      : `User-${socket.id.slice(0, 4)}`;
+    const targetUser = users.get(target);
+
+    if (caller.roomId !== targetUser.roomId) {
+      socket.emit("signal:error", {
+        message: "Cannot call a participant in another room",
+        targetId: target,
+      });
+      return;
+    }
+
+    const callerName = caller.username;
 
     io.to(target).emit("signal:incoming-call", {
       callerId: socket.id,
@@ -496,7 +838,6 @@ function registerSocketHandlers(io, socket) {
   socket.on("signal:call-user", handleCallUser);
   socket.on("callUser", handleCallUser);
 
-  // Accept an incoming call
   const handleAcceptCall = ({ targetId, to, signal } = {}) => {
     const target = targetId || to;
 
@@ -508,11 +849,19 @@ function registerSocketHandlers(io, socket) {
       return;
     }
 
-    const call = registerCall(target, socket.id);
+    const caller = users.get(target);
     const callee = users.get(socket.id);
-    const calleeName = callee
-      ? callee.username
-      : `User-${socket.id.slice(0, 4)}`;
+
+    if (!caller || !callee || caller.roomId !== callee.roomId) {
+      socket.emit("signal:error", {
+        message: "Caller is not in the same room",
+        targetId: target,
+      });
+      return;
+    }
+
+    const call = registerCall(target, socket.id);
+    const calleeName = callee.username;
 
     io.to(target).emit("signal:call-accepted", {
       peerId: socket.id,
@@ -544,11 +893,21 @@ function registerSocketHandlers(io, socket) {
     });
   });
 
-  // WebRTC offer, answer and ICE signaling
   socket.on("signal:offer", ({ targetId, offer } = {}) => {
     if (!targetId || !users.has(targetId) || !offer) {
       socket.emit("signal:error", {
         message: "Target peer not found or offer is missing",
+        targetId,
+      });
+      return;
+    }
+
+    const sender = users.get(socket.id);
+    const receiver = users.get(targetId);
+
+    if (!sender || !receiver || sender.roomId !== receiver.roomId) {
+      socket.emit("signal:error", {
+        message: "Target is not in the same room",
         targetId,
       });
       return;
@@ -569,6 +928,17 @@ function registerSocketHandlers(io, socket) {
       return;
     }
 
+    const sender = users.get(socket.id);
+    const receiver = users.get(targetId);
+
+    if (!sender || !receiver || sender.roomId !== receiver.roomId) {
+      socket.emit("signal:error", {
+        message: "Target is not in the same room",
+        targetId,
+      });
+      return;
+    }
+
     io.to(targetId).emit("signal:answer", {
       senderId: socket.id,
       answer,
@@ -579,6 +949,17 @@ function registerSocketHandlers(io, socket) {
     if (!targetId || !users.has(targetId) || !candidate) {
       socket.emit("signal:error", {
         message: "Target peer not found or ICE candidate is missing",
+        targetId,
+      });
+      return;
+    }
+
+    const sender = users.get(socket.id);
+    const receiver = users.get(targetId);
+
+    if (!sender || !receiver || sender.roomId !== receiver.roomId) {
+      socket.emit("signal:error", {
+        message: "Target is not in the same room",
         targetId,
       });
       return;
@@ -650,7 +1031,6 @@ function registerSocketHandlers(io, socket) {
     });
   });
 
-  // Spatial proximity
   socket.on("getNearbyUsers", (data = {}, callback) => {
     try {
       const currentUser = users.get(socket.id);
@@ -661,6 +1041,7 @@ function registerSocketHandlers(io, socket) {
         : 300;
 
       const roomParticipants = getRoomParticipants(currentUser.roomId);
+
       const nearby = getNearbyParticipants(
         currentUser,
         roomParticipants,
@@ -676,10 +1057,7 @@ function registerSocketHandlers(io, socket) {
       if (typeof callback === "function") callback(result);
       else socket.emit("nearbyUsers", result);
     } catch (error) {
-      console.error(
-        `[PROXIMITY ERROR] ${socket.id}:`,
-        error.message
-      );
+      console.error(`[PROXIMITY ERROR] ${socket.id}:`, error.message);
     }
   });
 
@@ -687,10 +1065,10 @@ function registerSocketHandlers(io, socket) {
     console.log(
       `[CLIENT DISCONNECT REQUEST] Client ${socket.id} requested disconnect`
     );
+
     socket.disconnect(true);
   });
 
-  // Persist communication sessions
   socket.on("startCommunicationSession", async (data = {}, callback) => {
     const respond = (result) => {
       if (typeof callback === "function") {
@@ -748,6 +1126,7 @@ function registerSocketHandlers(io, socket) {
         "Failed to start communication session:",
         error.message
       );
+
       respond({ error: "Failed to start communication session." });
     }
   });
@@ -812,11 +1191,11 @@ function registerSocketHandlers(io, socket) {
         "Failed to end communication session:",
         error.message
       );
+
       respond({ error: "Failed to end communication session." });
     }
   });
 
-  // Disconnect cleanup
   socket.on("disconnecting", (reason) => {
     cleanupUserCalls(socket.id, io, reason || "peer_disconnected");
   });
@@ -848,6 +1227,8 @@ function registerSocketHandlers(io, socket) {
         disconnectedUser?.username || `Guest-${socket.id.slice(0, 4)}`,
       reason,
     });
+
+    io.emit("roomListUpdated", getRoomsList());
 
     try {
       const endedAt = new Date();
@@ -911,12 +1292,19 @@ function clearUsers() {
   users.clear();
   activeSessions.clear();
   clearActiveCalls();
+  initDefaultRooms();
 }
 
 module.exports = {
   registerSocketHandlers,
   users,
   activeSessions,
+  rooms,
+  DEFAULT_ROOMS,
+  createRoom,
+  getRoomsList,
+  getRoomMeta,
+  initDefaultRooms,
   activeAudioCalls,
   userCallMap,
   registerCall,

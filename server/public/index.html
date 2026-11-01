@@ -355,6 +355,7 @@
             <option value="meeting-room-b">🎙️ Meeting Room B</option>
             <option value="lounge">☕ Lounge / Cafeteria</option>
           </select>
+          <button id="btnCreateRoomPrompt" class="call-btn" style="background: #3b82f6; margin-left: 4px; padding: 4px 8px;" title="Create custom room">+ Room</button>
         </div>
         <div class="hud-item">
           <span class="hud-label">Position:</span>
@@ -808,6 +809,55 @@
         usernameInput.blur();
       }
     });
+
+    // Dynamic Room Directory & Creation Handlers
+    const btnCreateRoomPrompt = document.getElementById("btnCreateRoomPrompt");
+
+    function updateRoomDropdown(roomList) {
+      if (!Array.isArray(roomList)) return;
+      const currentSelected = roomSelect.value;
+      roomSelect.innerHTML = "";
+      roomList.forEach((r) => {
+        const opt = document.createElement("option");
+        opt.value = r.id;
+        const icon = r.id === "main-office" ? "🏢 " : r.id.includes("meeting") ? "🎙️ " : r.id.includes("lounge") ? "☕ " : "🚪 ";
+        const countStr = typeof r.currentParticipants === "number" ? ` (${r.currentParticipants}/${r.maxParticipants || 25})` : "";
+        opt.textContent = `${icon}${r.name}${countStr}`;
+        if (r.id === currentSelected || r.id === currentRoomId) {
+          opt.selected = true;
+        }
+        roomSelect.appendChild(opt);
+      });
+    }
+
+    socket.on("roomList", updateRoomDropdown);
+    socket.on("roomListUpdated", updateRoomDropdown);
+
+    socket.on("error:room", (err) => {
+      logEvent(`⚠️ Room Error: ${err?.message || 'Operation failed'}`, true);
+      alert(`Room Error: ${err?.message || 'Operation failed'}`);
+    });
+
+    if (btnCreateRoomPrompt) {
+      btnCreateRoomPrompt.addEventListener("click", () => {
+        const roomName = prompt("Enter new room name (e.g. Design Huddle):");
+        if (!roomName || !roomName.trim()) return;
+        const maxCapStr = prompt("Enter max participants (2 - 50, default 15):", "15");
+        const maxParticipants = parseInt(maxCapStr, 10) || 15;
+
+        socket.emit("createRoom", {
+          name: roomName.trim(),
+          maxParticipants,
+        }, (res) => {
+          if (res && res.success) {
+            logEvent(`Created room "${res.room.name}" (${res.room.id})!`, true);
+            socket.emit("joinRoom", { roomId: res.room.id, username: usernameInput.value.trim() });
+          } else {
+            logEvent(`Failed to create room: ${res?.message || res?.error || 'Unknown error'}`, true);
+          }
+        });
+      });
+    }
 
     // Room Switcher Change Listener
     roomSelect.addEventListener("change", (e) => {

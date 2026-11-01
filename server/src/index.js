@@ -11,6 +11,8 @@ const connectDB = require("./config/db");
 const {
   registerSocketHandlers,
   getUserCount,
+  getRoomsList,
+  createRoom,
 } = require("./sockets/socketHandlers");
 const databaseService = require("./services/databaseService");
 
@@ -83,6 +85,47 @@ app.get("/api/status", (req, res) => {
     uptime: `${Math.floor(process.uptime())}s`,
     activeUsers: getUserCount(),
     timestamp: new Date().toISOString(),
+  });
+});
+
+// Room Directory Listing Endpoint
+app.get("/api/rooms", (req, res) => {
+  res.setHeader("Cache-Control", "no-cache");
+
+  res.json({
+    status: "OK",
+    rooms: getRoomsList(),
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// Room Creation Endpoint
+app.post("/api/rooms", (req, res) => {
+  const {
+    roomId,
+    name,
+    description,
+    maxParticipants,
+    isPrivate,
+  } = req.body || {};
+
+  const result = createRoom(
+    { roomId, name, description, maxParticipants, isPrivate },
+    "api"
+  );
+
+  if (!result.success) {
+    return res.status(400).json({
+      error: result.error,
+      roomId: result.roomId,
+    });
+  }
+
+  io.emit("roomListUpdated", getRoomsList());
+
+  return res.status(201).json({
+    status: "created",
+    room: result.room,
   });
 });
 
