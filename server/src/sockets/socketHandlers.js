@@ -316,6 +316,135 @@ const AVATAR_COLORS = [
   "#F97316",
 ];
 
+// Availability status options
+const VALID_AVAILABILITY = ["available", "away", "busy", "dnd"];
+
+// In-memory store of user profiles: userId -> profile object
+const profiles = new Map();
+
+function isValidHexColor(color) {
+  if (typeof color !== "string") return false;
+  return /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(color.trim());
+}
+
+function validateProfileData(data = {}) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return { valid: false, message: "Profile payload must be a JSON object" };
+  }
+
+  const rawUsername = data.username !== undefined ? data.username : data.displayName;
+  if (rawUsername !== undefined) {
+    if (typeof rawUsername !== "string" || rawUsername.trim().length === 0) {
+      return { valid: false, message: "Username must be a non-empty string" };
+    }
+    if (rawUsername.trim().length > 30) {
+      return { valid: false, message: "Username must not exceed 30 characters" };
+    }
+  }
+
+  const rawColor = data.color !== undefined ? data.color : data.avatarColor;
+  if (rawColor !== undefined) {
+    if (!isValidHexColor(rawColor)) {
+      return { valid: false, message: "Color must be a valid hex color code (e.g. #3B82F6)" };
+    }
+  }
+
+  const rawStatus = data.status !== undefined ? data.status : data.availability;
+  if (rawStatus !== undefined) {
+    if (!VALID_AVAILABILITY.includes(String(rawStatus).toLowerCase())) {
+      return {
+        valid: false,
+        message: `Status must be one of: ${VALID_AVAILABILITY.join(", ")}`,
+      };
+    }
+  }
+
+  return { valid: true };
+}
+
+function getProfile(userId) {
+  if (!userId || typeof userId !== "string") return null;
+  const cleanId = userId.trim();
+  if (profiles.has(cleanId)) {
+    return profiles.get(cleanId);
+  }
+
+  // If user is currently in active socket sessions, synthesize from socket user
+  for (const [sId, u] of users.entries()) {
+    if (sId === cleanId || u.id === cleanId) {
+      return {
+        userId: cleanId,
+        username: u.username,
+        displayName: u.username,
+        color: u.color,
+        avatarColor: u.color,
+        status: u.status || "available",
+        availability: u.status || "available",
+        updatedAt: new Date().toISOString(),
+      };
+    }
+  }
+
+  return null;
+}
+
+function saveProfile(userId, data = {}) {
+  if (!userId || typeof userId !== "string") {
+    return { success: false, message: "User ID is required", code: "INVALID_USER_ID" };
+  }
+
+  const validation = validateProfileData(data);
+  if (!validation.valid) {
+    return { success: false, message: validation.message, code: "VALIDATION_ERROR" };
+  }
+
+  const cleanId = userId.trim();
+  const existing = profiles.get(cleanId) || {
+    userId: cleanId,
+    username: `User-${cleanId.slice(0, 4)}`,
+    displayName: `User-${cleanId.slice(0, 4)}`,
+    color: AVATAR_COLORS[0],
+    avatarColor: AVATAR_COLORS[0],
+    status: "available",
+    availability: "available",
+    createdAt: new Date().toISOString(),
+  };
+
+  const rawUsername = data.username !== undefined ? data.username : data.displayName;
+  const cleanUsername = rawUsername ? sanitizeUsername(rawUsername, existing.username) : existing.username;
+
+  const rawColor = data.color !== undefined ? data.color : data.avatarColor;
+  const cleanColor = rawColor ? rawColor.trim() : existing.color;
+
+  const rawStatus = data.status !== undefined ? data.status : data.availability;
+  const cleanStatus = rawStatus ? String(rawStatus).toLowerCase() : existing.status;
+
+  const updatedProfile = {
+    userId: cleanId,
+    username: cleanUsername,
+    displayName: cleanUsername,
+    color: cleanColor,
+    avatarColor: cleanColor,
+    status: cleanStatus,
+    availability: cleanStatus,
+    updatedAt: new Date().toISOString(),
+  };
+
+  profiles.set(cleanId, updatedProfile);
+
+  // Synchronize with active socket user if connected
+  for (const [sId, u] of users.entries()) {
+    if (sId === cleanId || u.id === cleanId) {
+      u.username = cleanUsername;
+      u.color = cleanColor;
+      u.status = cleanStatus;
+      users.set(sId, u);
+    }
+  }
+
+  return { success: true, profile: updatedProfile };
+}
+
 function getRandomColor() {
   return AVATAR_COLORS[
     Math.floor(Math.random() * AVATAR_COLORS.length)
@@ -435,6 +564,7 @@ function registerSocketHandlers(io, socket) {
     y: 250,
     color: getRandomColor(),
     isMuted: false,
+    status: "available",
   };
 
   users.set(socket.id, user);
@@ -766,6 +896,7 @@ function registerSocketHandlers(io, socket) {
       x: currentUser.x,
       y: currentUser.y,
       color: currentUser.color,
+      status: currentUser.status || "available",
     };
 
     socket.to(currentUser.roomId).emit("roomPositionUpdated", payload);
@@ -775,6 +906,84 @@ function registerSocketHandlers(io, socket) {
 
   socket.on("updatePosition", handlePosition);
   socket.on("userMoved", handlePosition);
+
+  // Update the connected user's profile and notify other participants.
+  socket.on("updateProfile", (data = {}, callback) => {
+    try {
+      const result = saveProfile(socket.id, data);
+
+      if (!result.success) {
+        const errPayload = {
+          status: "error",
+          message: result.message,
+          code: result.code,
+        };
+        if (typeof callback === "function") callback(errPayload);
+        else socket.emit("error:validation", errPayload);
+        return;
+      }
+
+      const user = users.get(socket.id);
+      const broadcastPayload = {
+        id: socket.id,
+        userId: socket.id,
+        username: result.profile.username,
+        displayName: result.profile.displayName,
+        color: result.profile.color,
+        avatarColor: result.profile.avatarColor,
+        status: result.profile.status,
+        availability: result.profile.availability,
+        roomId: user?.roomId || DEFAULT_ROOM,
+      };
+
+      socket.broadcast.emit("userProfileUpdated", broadcastPayload);
+      socket.broadcast.emit("profileUpdated", broadcastPayload);
+      if (user?.roomId) {
+        socket.to(user.roomId).emit("roomProfileUpdated", broadcastPayload);
+      }
+
+      if (typeof callback === "function") {
+        callback({ status: "success", profile: result.profile });
+      } else {
+        socket.emit("profileUpdated", {
+          status: "success",
+          profile: result.profile,
+        });
+      }
+    } catch (err) {
+      console.error(`[UPDATE PROFILE ERROR] ${socket.id}:`, err.message);
+      const errPayload = {
+        status: "error",
+        message: "Failed to update profile",
+        code: "INTERNAL_ERROR",
+      };
+      if (typeof callback === "function") callback(errPayload);
+      else socket.emit("error:validation", errPayload);
+    }
+  });
+
+  // Retrieve a profile by user ID; defaults to the current socket user.
+  socket.on("getProfile", (data = {}, callback) => {
+    const targetUserId =
+      (typeof data === "string" ? data : data?.userId) || socket.id;
+    const profile = getProfile(targetUserId);
+
+    if (!profile) {
+      const errPayload = {
+        status: "error",
+        message: `Profile not found for userId: ${targetUserId}`,
+      };
+      if (typeof callback === "function") callback(errPayload);
+      else socket.emit("error:validation", errPayload);
+      return;
+    }
+
+    if (typeof callback === "function") {
+      callback({ status: "success", profile });
+    } else {
+      socket.emit("profileData", { status: "success", profile });
+    }
+  });
 
   const handleCallUser = ({
     targetId,
@@ -1291,6 +1500,7 @@ function hasUser(id) {
 function clearUsers() {
   users.clear();
   activeSessions.clear();
+  profiles.clear();
   clearActiveCalls();
   initDefaultRooms();
 }
@@ -1327,4 +1537,10 @@ module.exports = {
   getNearbyParticipants,
   DEFAULT_ROOM,
   MAP_BOUNDS,
+  // Profile system exports
+  getProfile,
+  saveProfile,
+  validateProfileData,
+  profiles,
 };
+

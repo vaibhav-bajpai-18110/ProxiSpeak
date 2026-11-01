@@ -13,6 +13,8 @@ const {
   getUserCount,
   getRoomsList,
   createRoom,
+  getProfile,
+  saveProfile,
 } = require("./sockets/socketHandlers");
 const databaseService = require("./services/databaseService");
 
@@ -116,7 +118,9 @@ app.post("/api/rooms", (req, res) => {
 
   if (!result.success) {
     return res.status(400).json({
+      status: "error",
       error: result.error,
+      message: result.error || "Room creation failed",
       roomId: result.roomId,
     });
   }
@@ -132,7 +136,7 @@ app.post("/api/rooms", (req, res) => {
 // Create a world
 app.post("/api/worlds", async (req, res) => {
   try {
-    const { name, ownerId, layout } = req.body;
+    const { name, ownerId, layout } = req.body || {};
 
     if (
       typeof name !== "string" ||
@@ -165,6 +169,68 @@ app.post("/api/worlds", async (req, res) => {
     });
   }
 });
+
+// Profile query endpoints
+const handleGetProfile = (req, res) => {
+  res.setHeader("Cache-Control", "no-cache");
+  const userId = req.params.userId || req.query.userId || req.query.id;
+
+  if (!userId) {
+    return res.status(400).json({
+      status: "error",
+      error: "Bad Request",
+      message: "User ID parameter or query (?userId=...) is required",
+      code: "MISSING_USER_ID",
+    });
+  }
+
+  const profile = getProfile(userId);
+  if (!profile) {
+    return res.status(404).json({
+      status: "error",
+      error: "Not Found",
+      message: `Profile not found for userId: ${userId}`,
+      code: "PROFILE_NOT_FOUND",
+    });
+  }
+
+  return res.json({ status: "success", profile });
+};
+
+app.get("/api/profile", handleGetProfile);
+app.get("/api/profile/:userId", handleGetProfile);
+
+// Profile update endpoints
+const handleProfileUpdate = (req, res) => {
+  const userId = req.params.userId || req.body?.userId || req.query?.userId;
+
+  if (!userId) {
+    return res.status(400).json({
+      status: "error",
+      error: "Bad Request",
+      message: "User ID is required to update profile",
+      code: "MISSING_USER_ID",
+    });
+  }
+
+  const result = saveProfile(userId, req.body || {});
+  if (!result.success) {
+    return res.status(400).json({
+      status: "error",
+      error: result.message,
+      message: result.message,
+      code: result.code || "VALIDATION_ERROR",
+    });
+  }
+
+  io.emit("userProfileUpdated", { userId, ...result.profile });
+
+  return res.json({ status: "success", profile: result.profile });
+};
+
+app.put("/api/profile", handleProfileUpdate);
+app.put("/api/profile/:userId", handleProfileUpdate);
+app.post("/api/profile", handleProfileUpdate);
 
 // List worlds
 app.get("/api/worlds", async (req, res) => {
@@ -300,3 +366,4 @@ async function startServer() {
 }
 
 startServer();
+
