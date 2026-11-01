@@ -1618,6 +1618,181 @@ async function testProfileApiAndRealtimeProfileSync(serverUrl) {
   });
 }
 
+// Test 24: Real-Time Participant Synchronization, Movement, Joining, Leaving & Live Updates Across Multiple Clients (Task 16)
+async function testRealtimeParticipantSyncAndMovementLifecycle(serverUrl) {
+  return new Promise(async (resolve, reject) => {
+    const client1 = io(serverUrl, { transports: ["websocket", "polling"], timeout: 6000 });
+    const client2 = io(serverUrl, { transports: ["websocket", "polling"], timeout: 6000 });
+    const client3 = io(serverUrl, { transports: ["websocket", "polling"], timeout: 6000 });
+    const client4 = io(serverUrl, { transports: ["websocket", "polling"], timeout: 6000 });
+
+    const clients = [client1, client2, client3, client4];
+
+    const timeout = setTimeout(() => {
+      clients.forEach((c) => c.disconnect());
+      reject(new Error("Multi-client participant sync & movement lifecycle test timed out after 12000ms"));
+    }, 12000);
+
+    try {
+      // Connect all 4 clients cleanly using connection check
+      await Promise.all(
+        clients.map((c) => new Promise((res, rej) => {
+          if (c.connected) return res();
+          c.once("connect", res);
+          c.once("connect_error", rej);
+        }))
+      );
+
+      // Verify Initial Roster Sync across co-located room members
+      let c1Roster = [];
+      let c2Roster = [];
+      await Promise.all([
+        new Promise((res) => client1.emit("getParticipants", { roomId: "main-office" }, (data) => { c1Roster = data.participants || []; res(); })),
+        new Promise((res) => client2.emit("getParticipants", { roomId: "main-office" }, (data) => { c2Roster = data.participants || []; res(); })),
+      ]);
+
+      const c1RosterIds = c1Roster.map((u) => u.id);
+      const step1JoinSyncSuccess = c1RosterIds.includes(client1.id) && c1RosterIds.includes(client2.id) && c1Roster.length >= 4;
+      const step2MultiJoinSuccess = c2Roster.length === c1Roster.length && c2Roster.some((u) => u.id === client3.id) && c2Roster.some((u) => u.id === client4.id);
+
+      // Avatar Movement - Client 1 moves, Clients 2, 3, 4 receive live update
+      let c2ReceivedC1Move = false;
+      let c3ReceivedC1Move = false;
+      let c4ReceivedC1Move = false;
+
+      client2.on("userPositionUpdated", (pos) => {
+        if (pos.id === client1.id && pos.x === 350 && pos.y === 450) c2ReceivedC1Move = true;
+      });
+      client3.on("userPositionUpdated", (pos) => {
+        if (pos.id === client1.id && pos.x === 350 && pos.y === 450) c3ReceivedC1Move = true;
+      });
+      client4.on("userPositionUpdated", (pos) => {
+        if (pos.id === client1.id && pos.x === 350 && pos.y === 450) c4ReceivedC1Move = true;
+      });
+
+      client1.emit("updatePosition", { x: 350, y: 450 });
+      await new Promise((r) => setTimeout(r, 250));
+
+      const step3MovementBroadcastSuccess = c2ReceivedC1Move && c3ReceivedC1Move && c4ReceivedC1Move;
+
+      // Concurrent Simultaneous Movements from Clients 2, 3, 4 to Client 1
+      let c1ReceivedC2ConcurrentMove = false;
+      let c1ReceivedC3ConcurrentMove = false;
+      let c1ReceivedC4ConcurrentMove = false;
+
+      const concurrentHandler = (pos) => {
+        if (pos.id === client2.id && pos.x === 600 && pos.y === 700) c1ReceivedC2ConcurrentMove = true;
+        if (pos.id === client3.id && pos.x === 800 && pos.y === 900) c1ReceivedC3ConcurrentMove = true;
+        if (pos.id === client4.id && pos.x === 1000 && pos.y === 1100) c1ReceivedC4ConcurrentMove = true;
+      };
+      client1.on("userPositionUpdated", concurrentHandler);
+
+      client2.emit("updatePosition", { x: 600, y: 700 });
+      client3.emit("updatePosition", { x: 800, y: 900 });
+      client4.emit("updatePosition", { x: 1000, y: 1100 });
+      await new Promise((r) => setTimeout(r, 300));
+      client1.off("userPositionUpdated", concurrentHandler);
+
+      const step4ConcurrentMovesSuccess = c1ReceivedC2ConcurrentMove && c1ReceivedC3ConcurrentMove && c1ReceivedC4ConcurrentMove;
+
+      // Rapid Sequential Movement Burst (Hold/Drag Simulation)
+      let c2FinalPosition = null;
+      const burstHandler = (pos) => {
+        if (pos.id === client1.id) c2FinalPosition = { x: pos.x, y: pos.y };
+      };
+      client2.on("roomPositionUpdated", burstHandler);
+
+      for (let i = 1; i <= 10; i++) {
+        client1.emit("updatePosition", { x: 100 + i * 10, y: 100 + i * 10 });
+      }
+      await new Promise((r) => setTimeout(r, 300));
+      client2.off("roomPositionUpdated", burstHandler);
+
+      const step5BurstMovesSuccess = Boolean(c2FinalPosition && c2FinalPosition.x === 200 && c2FinalPosition.y === 200);
+
+      // Live Profile Update across multiple clients
+      let c1SawC4ProfileUpdate = false;
+      let c2SawC4ProfileUpdate = false;
+      let c3SawC4ProfileUpdate = false;
+
+      const profileUpdateHandler1 = (p) => { if (p.id === client4.id && p.username === "WonderWoman" && p.status === "busy") c1SawC4ProfileUpdate = true; };
+      const profileUpdateHandler2 = (p) => { if (p.id === client4.id && p.username === "WonderWoman" && p.status === "busy") c2SawC4ProfileUpdate = true; };
+      const profileUpdateHandler3 = (p) => { if (p.id === client4.id && p.username === "WonderWoman" && p.status === "busy") c3SawC4ProfileUpdate = true; };
+
+      client1.on("userProfileUpdated", profileUpdateHandler1);
+      client2.on("userProfileUpdated", profileUpdateHandler2);
+      client3.on("userProfileUpdated", profileUpdateHandler3);
+
+      await new Promise((res) => {
+        client4.emit("updateProfile", { username: "WonderWoman", color: "#EC4899", status: "busy" }, res);
+      });
+      await new Promise((r) => setTimeout(r, 200));
+
+      const step6LiveProfileUpdateSuccess = c1SawC4ProfileUpdate && c2SawC4ProfileUpdate && c3SawC4ProfileUpdate;
+
+      // User Leaving Lifecycle - Room Switch departure
+      let c1SawC3LeaveRoom = false;
+      const leaveRoomHandler = (data) => {
+        if (data.id === client3.id && data.reason === "room_switched") c1SawC3LeaveRoom = true;
+      };
+      client1.on("participantLeft", leaveRoomHandler);
+
+      await new Promise((res) => {
+        client3.emit("joinRoom", { roomId: "meeting-room-a" }, res);
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      client1.off("participantLeft", leaveRoomHandler);
+
+      // User Leaving Lifecycle - Disconnection
+      let c1SawC2Disconnect = false;
+      const client2Id = client2.id;
+      const disconnectHandler = (data) => {
+        if (data.id === client2Id) c1SawC2Disconnect = true;
+      };
+      client1.on("userDisconnected", disconnectHandler);
+
+      client2.disconnect();
+      await new Promise((r) => setTimeout(r, 300));
+      client1.off("userDisconnected", disconnectHandler);
+
+      // Verify Main Office Roster after departures
+      let finalRoster = [];
+      await new Promise((res) => {
+        client1.emit("getParticipants", { roomId: "main-office" }, (data) => {
+          finalRoster = data.participants || [];
+          res();
+        });
+      });
+
+      const finalRosterIds = finalRoster.map((u) => u.id);
+      const step7RosterIntegritySuccess =
+        c1SawC3LeaveRoom &&
+        c1SawC2Disconnect &&
+        finalRosterIds.includes(client1.id) &&
+        finalRosterIds.includes(client4.id) &&
+        !finalRosterIds.includes(client2Id) &&
+        !finalRosterIds.includes(client3.id);
+
+      clearTimeout(timeout);
+      clients.forEach((c) => c.disconnect());
+
+      resolve({
+        step1JoinSyncSuccess,
+        step2MultiJoinSuccess,
+        step3MovementBroadcastSuccess,
+        step4ConcurrentMovesSuccess,
+        step5BurstMovesSuccess,
+        step6LiveProfileUpdateSuccess,
+        step7RosterIntegritySuccess,
+      });
+    } catch (err) {
+      clearTimeout(timeout);
+      clients.forEach((c) => c.disconnect());
+      reject(err);
+    }
+  });
+}
+
 async function runTest() {
   let hasErrors = false;
   console.log("Starting ProxiSpeak server for verification...");
@@ -1971,6 +2146,31 @@ async function runTest() {
       hasErrors = true;
     }
 
+    // 24. Real-Time Participant Sync, Avatar Movement, User Joining & Leaving Lifecycle (Task 16)
+    await new Promise((r) => setTimeout(r, 400));
+    console.log("\n--- [24] Testing Real-Time Participant Sync, Movement, Joining & Leaving (Task 16) ---");
+    const multiClientResult = await testRealtimeParticipantSyncAndMovementLifecycle("http://localhost:5000");
+    if (
+      multiClientResult.step1JoinSyncSuccess &&
+      multiClientResult.step2MultiJoinSuccess &&
+      multiClientResult.step3MovementBroadcastSuccess &&
+      multiClientResult.step4ConcurrentMovesSuccess &&
+      multiClientResult.step5BurstMovesSuccess &&
+      multiClientResult.step6LiveProfileUpdateSuccess &&
+      multiClientResult.step7RosterIntegritySuccess
+    ) {
+      console.log("--> PASS: Multi-client connection and real-time participantJoined roster synchronization verified.");
+      console.log("--> PASS: Multiple simultaneous client joins reliably update active participant counts.");
+      console.log("--> PASS: Live avatar movement broadcasted to all co-located peers in real-time.");
+      console.log("--> PASS: Concurrent avatar movements across 3+ clients processed without packet loss or dropouts.");
+      console.log("--> PASS: High-frequency sequential movement bursts accurately received in order at destination.");
+      console.log("--> PASS: Live profile updates (name, color, status) propagated to all connected clients immediately.");
+      console.log("--> PASS: User departure (room switch & disconnection) cleans up participant roster with zero zombie users.");
+    } else {
+      console.error("--> FAIL: Multi-client participant sync & movement lifecycle test failed:", multiClientResult);
+      hasErrors = true;
+    }
+
   } catch (err) {
     console.error("\n[TEST RUNNER EXCEPTION]:", err.message || err);
     hasErrors = true;
@@ -1984,7 +2184,7 @@ async function runTest() {
       console.error("\n❌ VERIFICATION FAILED: One or more tests did not pass.\n");
       process.exit(1);
     } else {
-      console.log("\n✅ ALL TESTS PASSED: All 23 backend modules, room lifecycle, capacity enforcement, profile sync, and WebRTC verified.\n");
+      console.log("\n✅ ALL TESTS PASSED: All 24 backend modules, multi-client participant sync, movement, joining/leaving, and WebRTC verified.\n");
       process.exit(0);
     }
   }

@@ -338,9 +338,13 @@ function saveProfile(userId, data = {}) {
   // Synchronize with active socket user if connected
   for (const [sId, u] of users.entries()) {
     if (sId === cleanId || u.id === cleanId) {
+      u.name = cleanUsername;
       u.username = cleanUsername;
+      u.displayName = cleanUsername;
       u.color = cleanColor;
+      u.avatarColor = cleanColor;
       u.status = cleanStatus;
+      u.availability = cleanStatus;
       users.set(sId, u);
     }
   }
@@ -381,7 +385,7 @@ function getRoomParticipants(roomId) {
   const participants = [];
   for (const user of users.values()) {
     if (user.roomId === roomId) {
-      participants.push(user);
+      participants.push({ ...user });
     }
   }
   return participants;
@@ -410,6 +414,8 @@ function executeRoomJoin(socket, targetRoomId, newUsername, io) {
   // Same room, username change only
   if (oldRoom === targetRoom) {
     user.username = targetUsername;
+    user.name = targetUsername;
+    user.displayName = targetUsername;
     users.set(socket.id, user);
     socket.to(targetRoom).emit("participantJoined", user);
     socket.broadcast.emit("userJoined", user);
@@ -442,6 +448,7 @@ function executeRoomJoin(socket, targetRoomId, newUsername, io) {
   socket.leave(oldRoom);
   socket.to(oldRoom).emit("participantLeft", {
     id: socket.id,
+    name: user.username,
     username: user.username,
     roomId: oldRoom,
     reason: "room_switched",
@@ -451,6 +458,8 @@ function executeRoomJoin(socket, targetRoomId, newUsername, io) {
   socket.join(targetRoom);
   user.roomId = targetRoom;
   user.username = targetUsername;
+  user.name = targetUsername;
+  user.displayName = targetUsername;
   users.set(socket.id, user);
 
   console.log(`[ROOM SWITCH] User ${socket.id} moved from ${oldRoom} to ${targetRoom}`);
@@ -498,12 +507,16 @@ function handleUpdatePosition(socket, positionData) {
 
     const updatePayload = {
       id: socket.id,
+      name: currentUser.username,
+      displayName: currentUser.username,
       username: currentUser.username,
       roomId: currentUser.roomId,
       x: boundedX,
       y: boundedY,
       color: currentUser.color,
+      avatarColor: currentUser.color,
       status: currentUser.status || "available",
+      availability: currentUser.status || "available",
     };
 
     // Broadcast position update to peers: room-scoped and backward-compatible global broadcast
@@ -526,14 +539,19 @@ function registerSocketHandlers(io, socket) {
   });
 
   // Default user record upon connection
+  const assignedColor = getRandomColor();
   const defaultUser = {
     id: socket.id,
+    name: `User-${socket.id.slice(0, 4)}`,
     username: `User-${socket.id.slice(0, 4)}`,
+    displayName: `User-${socket.id.slice(0, 4)}`,
     roomId: DEFAULT_ROOM,
     x: Math.floor(100 + Math.random() * 400),
     y: Math.floor(100 + Math.random() * 300),
-    color: getRandomColor(),
+    color: assignedColor,
+    avatarColor: assignedColor,
     status: "available",
+    availability: "available",
   };
 
   users.set(socket.id, defaultUser);
@@ -752,6 +770,7 @@ function registerSocketHandlers(io, socket) {
       const broadcastPayload = {
         id: socket.id,
         userId: socket.id,
+        name: result.profile.username,
         username: result.profile.username,
         displayName: result.profile.displayName,
         color: result.profile.color,
@@ -759,13 +778,17 @@ function registerSocketHandlers(io, socket) {
         status: result.profile.status,
         availability: result.profile.availability,
         roomId: user?.roomId || DEFAULT_ROOM,
+        x: user?.x || 0,
+        y: user?.y || 0,
       };
 
-      // Broadcast profile updates in real-time
+      // Broadcast profile updates in real-time across standard, room, and roster events
       socket.broadcast.emit("userProfileUpdated", broadcastPayload);
       socket.broadcast.emit("profileUpdated", broadcastPayload);
+      socket.broadcast.emit("userJoined", broadcastPayload);
       if (user?.roomId) {
         socket.to(user.roomId).emit("roomProfileUpdated", broadcastPayload);
+        socket.to(user.roomId).emit("participantJoined", broadcastPayload);
       }
 
       if (typeof callback === "function") {
@@ -999,6 +1022,7 @@ function registerSocketHandlers(io, socket) {
         notifiedRooms.add(room);
         socket.to(room).emit("participantLeft", {
           id: socket.id,
+          name: existingUser?.username || `User-${socket.id.slice(0, 4)}`,
           username: existingUser?.username || `User-${socket.id.slice(0, 4)}`,
           roomId: room,
           reason,
@@ -1009,6 +1033,7 @@ function registerSocketHandlers(io, socket) {
     if (existingUser?.roomId && !notifiedRooms.has(existingUser.roomId)) {
       socket.to(existingUser.roomId).emit("participantLeft", {
         id: socket.id,
+        name: existingUser.username,
         username: existingUser.username,
         roomId: existingUser.roomId,
         reason,
@@ -1033,6 +1058,7 @@ function registerSocketHandlers(io, socket) {
     // Notify remaining clients across the server with structured disconnect payload
     const disconnectPayload = {
       id: socket.id,
+      name: existingUser?.username || `User-${socket.id.slice(0, 4)}`,
       username: existingUser?.username || `User-${socket.id.slice(0, 4)}`,
       reason,
     };
