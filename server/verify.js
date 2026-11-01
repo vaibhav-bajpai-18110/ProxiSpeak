@@ -1793,6 +1793,142 @@ async function testRealtimeParticipantSyncAndMovementLifecycle(serverUrl) {
   });
 }
 
+// Test 25: Room Chat Delivery, History, and Same-Room WebRTC Signaling Relays with senderId
+async function testRoomChatAndSameRoomWebRTCRelays(serverUrl) {
+  return new Promise(async (resolve, reject) => {
+    const clientA = io(serverUrl, { transports: ["websocket", "polling"], timeout: 6000 });
+    const clientB = io(serverUrl, { transports: ["websocket", "polling"], timeout: 6000 });
+    const clientC = io(serverUrl, { transports: ["websocket", "polling"], timeout: 6000 });
+
+    const clients = [clientA, clientB, clientC];
+    const timeout = setTimeout(() => {
+      clients.forEach((c) => c.disconnect());
+      reject(new Error("Room chat and WebRTC relay test timed out after 12000ms"));
+    }, 12000);
+
+    try {
+      await Promise.all(
+        clients.map((c) => new Promise((res, rej) => {
+          if (c.connected) return res();
+          c.once("connect", res);
+          c.once("connect_error", rej);
+        }))
+      );
+
+      // Client A and B are in main-office (default). Move Client C to meeting-room-a.
+      await new Promise((res) => clientC.emit("joinRoom", { roomId: "meeting-room-a", username: "Charlie" }, res));
+      await new Promise((r) => setTimeout(r, 200));
+
+      // 1. Room Chat Delivery within main-office
+      let clientBReceivedChat = null;
+      let clientCReceivedChat = null;
+
+      clientB.on("chat:message", (msg) => { clientBReceivedChat = msg; });
+      clientC.on("chat:message", (msg) => { clientCReceivedChat = msg; });
+
+      let clientAAckSuccess = false;
+      await new Promise((res) => {
+        clientA.emit("chat:send", { roomId: "main-office", message: "Hello office team!" }, (response) => {
+          if (response?.status === "success" && response?.message?.message === "Hello office team!") {
+            clientAAckSuccess = true;
+          }
+          res();
+        });
+      });
+      await new Promise((r) => setTimeout(r, 200));
+
+      const chatDeliverySuccess = Boolean(
+        clientBReceivedChat &&
+        clientBReceivedChat.senderId === clientA.id &&
+        clientBReceivedChat.message === "Hello office team!" &&
+        clientCReceivedChat === null && // Room isolation: Client C in meeting-room-a did NOT receive it
+        clientAAckSuccess
+      );
+
+      // 2. Chat Validation Error (Empty Message)
+      let emptyMsgError = null;
+      await new Promise((res) => {
+        clientA.emit("chat:send", { roomId: "main-office", message: "   " }, (err) => {
+          if (err?.status === "error") emptyMsgError = err.message;
+          res();
+        });
+      });
+      const emptyValidationHandled = Boolean(emptyMsgError && emptyMsgError.includes("cannot be empty"));
+
+      // 3. REST API Chat History Query
+      const historyRes = await checkUrl(`${serverUrl}/api/rooms/main-office/messages`);
+      const historyJson = JSON.parse(historyRes.body);
+      const restChatHistorySuccess = historyRes.status === 200 &&
+        historyJson.status === "success" &&
+        Array.isArray(historyJson.messages) &&
+        historyJson.messages.some((m) => m.message === "Hello office team!");
+
+      // 4. Same-Room WebRTC Signaling Relay with senderId
+      let clientBReceivedOffer = null;
+      let clientAReceivedAnswer = null;
+      let clientBReceivedCandidate = null;
+
+      clientB.once("signal:offer", (data) => { clientBReceivedOffer = data; });
+      clientA.once("signal:answer", (data) => { clientAReceivedAnswer = data; });
+      clientB.once("signal:ice-candidate", (data) => { clientBReceivedCandidate = data; });
+
+      // Client A sends offer to Client B (same room)
+      clientA.emit("signal:offer", { targetId: clientB.id, offer: { type: "offer", sdp: "dummy_sdp" } });
+      await new Promise((r) => setTimeout(r, 150));
+
+      // Client B answers Client A (same room)
+      clientB.emit("signal:answer", { targetId: clientA.id, answer: { type: "answer", sdp: "dummy_sdp_answer" } });
+      await new Promise((r) => setTimeout(r, 150));
+
+      // Client A sends ICE candidate to Client B (same room)
+      clientA.emit("signal:ice-candidate", { targetId: clientB.id, candidate: { candidate: "dummy_candidate" } });
+      await new Promise((r) => setTimeout(r, 150));
+
+      const sameRoomRelaySuccess = Boolean(
+        clientBReceivedOffer &&
+        clientBReceivedOffer.senderId === clientA.id &&
+        clientAReceivedAnswer &&
+        clientAReceivedAnswer.senderId === clientB.id &&
+        clientBReceivedCandidate &&
+        clientBReceivedCandidate.senderId === clientA.id
+      );
+
+      // 5. Cross-Room WebRTC Call & Signaling Blocking with signal:error
+      let crossRoomCallError = null;
+      clientA.once("signal:error", (err) => { crossRoomCallError = err.message; });
+      clientA.emit("signal:call-user", { targetId: clientC.id }); // Client C is in meeting-room-a, Client A is in main-office
+      await new Promise((r) => setTimeout(r, 150));
+
+      let crossRoomOfferError = null;
+      clientA.once("signal:error", (err) => { crossRoomOfferError = err.message; });
+      clientA.emit("signal:offer", { targetId: clientC.id, offer: { type: "offer", sdp: "cross_room" } });
+      await new Promise((r) => setTimeout(r, 150));
+
+      const crossRoomBlockedSuccess = Boolean(
+        crossRoomCallError &&
+        crossRoomCallError.includes("not in the same room") &&
+        crossRoomOfferError &&
+        crossRoomOfferError.includes("not in the same room")
+      );
+
+      clearTimeout(timeout);
+      clients.forEach((c) => c.disconnect());
+
+      resolve({
+        chatDeliverySuccess,
+        emptyValidationHandled,
+        restChatHistorySuccess,
+        sameRoomRelaySuccess,
+        crossRoomBlockedSuccess,
+      });
+    } catch (err) {
+      clearTimeout(timeout);
+      clients.forEach((c) => c.disconnect());
+      reject(err);
+    }
+  });
+}
+
 async function runTest() {
   let hasErrors = false;
   console.log("Starting ProxiSpeak server for verification...");
@@ -2171,6 +2307,28 @@ async function runTest() {
       hasErrors = true;
     }
 
+    // 25. Room Chat Delivery, History, and Same-Room WebRTC Signaling Relays with senderId
+    await new Promise((r) => setTimeout(r, 400));
+    console.log("\n--- [25] Testing Room Chat Delivery, History & Same-Room WebRTC Signaling Relays ---");
+    const chatRelayResult = await testRoomChatAndSameRoomWebRTCRelays("http://localhost:5000");
+    if (
+      chatRelayResult.chatDeliverySuccess &&
+      chatRelayResult.emptyValidationHandled &&
+      chatRelayResult.restChatHistorySuccess &&
+      chatRelayResult.sameRoomRelaySuccess &&
+      chatRelayResult.crossRoomBlockedSuccess
+    ) {
+      console.log("--> PASS: Room chat message successfully broadcasted to co-located room members.");
+      console.log("--> PASS: Room chat message strictly isolated from peers in different rooms.");
+      console.log("--> PASS: Empty chat message safely rejected with validation error.");
+      console.log("--> PASS: REST API GET /api/rooms/:roomId/messages returns accurate chat history.");
+      console.log("--> PASS: WebRTC offer, answer, and ICE candidate signals include senderId and relay cleanly.");
+      console.log("--> PASS: Cross-room WebRTC call and signaling attempts safely blocked with signal:error.");
+    } else {
+      console.error("--> FAIL: Room chat and WebRTC relay test failed:", chatRelayResult);
+      hasErrors = true;
+    }
+
   } catch (err) {
     console.error("\n[TEST RUNNER EXCEPTION]:", err.message || err);
     hasErrors = true;
@@ -2184,7 +2342,7 @@ async function runTest() {
       console.error("\n❌ VERIFICATION FAILED: One or more tests did not pass.\n");
       process.exit(1);
     } else {
-      console.log("\n✅ ALL TESTS PASSED: All 24 backend modules, multi-client participant sync, movement, joining/leaving, and WebRTC verified.\n");
+      console.log("\n✅ ALL TESTS PASSED: All 25 backend modules, room chat delivery, same-room WebRTC relays, profile sync, and lifecycle verified.\n");
       process.exit(0);
     }
   }

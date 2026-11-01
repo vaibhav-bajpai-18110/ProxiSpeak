@@ -12,6 +12,8 @@ const {
   createRoom,
   getProfile,
   saveProfile,
+  getRoomMessages,
+  sanitizeRoomId,
 } = require("./sockets/socketHandlers");
 
 // Process-level error safety nets to prevent server crashes
@@ -102,6 +104,17 @@ app.post("/api/rooms", (req, res) => {
   }
   io.emit("roomListUpdated", getRoomsList());
   res.status(201).json({ status: "created", room: result.room });
+});
+
+// Room Chat History Endpoint
+app.get("/api/rooms/:roomId/messages", (req, res) => {
+  res.setHeader("Cache-Control", "no-cache");
+  const roomId = sanitizeRoomId(req.params.roomId);
+  res.json({
+    status: "success",
+    roomId,
+    messages: getRoomMessages(roomId),
+  });
 });
 
 // Single Unified Profile Query Handler (Supports :userId path param or query string ?userId=...)

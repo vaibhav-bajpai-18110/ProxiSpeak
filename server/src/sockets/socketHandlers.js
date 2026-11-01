@@ -225,6 +225,46 @@ const VALID_AVAILABILITY = ["available", "away", "busy", "dnd"];
 // In-memory store of user profiles: userId -> profile object
 const profiles = new Map();
 
+// In-memory store of room chat messages: roomId -> Array of message records
+const roomChatMessages = new Map();
+
+function saveRoomMessage(roomId, senderId, senderName, messageText) {
+  const cleanRoomId = sanitizeRoomId(roomId || DEFAULT_ROOM);
+  if (typeof messageText !== "string" || messageText.trim().length === 0) {
+    return { success: false, message: "Chat message cannot be empty", code: "VALIDATION_ERROR" };
+  }
+  const cleanText = messageText.trim().slice(0, 500);
+  const cleanSenderName = (typeof senderName === "string" && senderName.trim().length > 0)
+    ? senderName.trim().slice(0, 30)
+    : `User-${senderId ? senderId.slice(0, 4) : "anon"}`;
+
+  const messageRecord = {
+    id: `msg_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
+    roomId: cleanRoomId,
+    senderId: senderId || "system",
+    senderName: cleanSenderName,
+    message: cleanText,
+    text: cleanText,
+    timestamp: new Date().toISOString(),
+  };
+
+  if (!roomChatMessages.has(cleanRoomId)) {
+    roomChatMessages.set(cleanRoomId, []);
+  }
+  const history = roomChatMessages.get(cleanRoomId);
+  history.push(messageRecord);
+  if (history.length > 100) {
+    history.shift();
+  }
+
+  return { success: true, message: messageRecord };
+}
+
+function getRoomMessages(roomId) {
+  const cleanRoomId = sanitizeRoomId(roomId || DEFAULT_ROOM);
+  return roomChatMessages.get(cleanRoomId) || [];
+}
+
 function isValidHexColor(color) {
   if (typeof color !== "string") return false;
   return /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(color.trim());
@@ -500,6 +540,13 @@ function handleUpdatePosition(socket, positionData) {
 
     const boundedX = clamp(positionData.x, MAP_BOUNDS.MIN_X, MAP_BOUNDS.MAX_X);
     const boundedY = clamp(positionData.y, MAP_BOUNDS.MIN_Y, MAP_BOUNDS.MAX_Y);
+
+    if (positionData.roomId && typeof positionData.roomId === "string") {
+      const targetRoom = sanitizeRoomId(positionData.roomId);
+      if (rooms.has(targetRoom)) {
+        currentUser.roomId = targetRoom;
+      }
+    }
 
     currentUser.x = boundedX;
     currentUser.y = boundedY;
@@ -818,26 +865,87 @@ function registerSocketHandlers(io, socket) {
     }
   });
 
-  // 8. WebRTC Audio Calling Signaling & Call State Handlers
+  // 8. Room Chat Delivery
+  const handleSendMessage = (data = {}, callback) => {
+    try {
+      const user = users.get(socket.id);
+      const targetRoomId = (data && data.roomId) ? sanitizeRoomId(data.roomId) : (user?.roomId || DEFAULT_ROOM);
+      const text = typeof data === "string" ? data : (data?.message || data?.text || "");
+
+      const result = saveRoomMessage(
+        targetRoomId,
+        socket.id,
+        user?.username || `User-${socket.id.slice(0, 4)}`,
+        text
+      );
+
+      if (!result.success) {
+        const errPayload = { status: "error", message: result.message, code: result.code };
+        if (typeof callback === "function") callback(errPayload);
+        else socket.emit("error:validation", errPayload);
+        return;
+      }
+
+      // Broadcast to co-located room members
+      io.to(targetRoomId).emit("chat:message", result.message);
+      io.to(targetRoomId).emit("chatMessage", result.message);
+
+      if (typeof callback === "function") {
+        callback({ status: "success", message: result.message });
+      }
+    } catch (err) {
+      console.error(`[CHAT SEND ERROR] ${socket.id}:`, err.message);
+      const errPayload = { status: "error", message: "Failed to send chat message", code: "INTERNAL_ERROR" };
+      if (typeof callback === "function") callback(errPayload);
+      else socket.emit("error:validation", errPayload);
+    }
+  };
+
+  socket.on("chat:send", handleSendMessage);
+  socket.on("sendMessage", handleSendMessage);
+  socket.on("sendChatMessage", handleSendMessage);
+
+  const handleGetChatHistory = (data = {}, callback) => {
+    const user = users.get(socket.id);
+    const targetRoomId = (data && data.roomId) ? sanitizeRoomId(data.roomId) : (user?.roomId || DEFAULT_ROOM);
+    const messages = getRoomMessages(targetRoomId);
+
+    if (typeof callback === "function") {
+      callback({ status: "success", roomId: targetRoomId, messages });
+    } else {
+      socket.emit("chat:history", { status: "success", roomId: targetRoomId, messages });
+    }
+  };
+
+  socket.on("chat:history", handleGetChatHistory);
+  socket.on("getChatHistory", handleGetChatHistory);
+
+  // 9. WebRTC Audio Calling Signaling & Call State Handlers
   const handleCallUser = ({ targetId, userToCall, metadata = {}, signalData } = {}) => {
     const target = targetId || userToCall;
     if (!target) {
-      socket.emit("signal:error", { message: "Target peer ID is required", targetId: null });
+      socket.emit("signal:error", { status: "error", message: "Target peer ID is required", targetId: null });
       return;
     }
     if (target === socket.id) {
-      socket.emit("signal:error", { message: "Cannot call yourself", targetId: target });
+      socket.emit("signal:error", { status: "error", message: "Cannot call yourself", targetId: target });
       return;
     }
-    if (!users.has(target)) {
-      socket.emit("signal:error", { message: "Target peer not found or offline", targetId: target });
+    const caller = users.get(socket.id);
+    const targetUser = users.get(target);
+    if (!targetUser || (caller && caller.roomId !== targetUser.roomId)) {
+      socket.emit("signal:error", {
+        status: "error",
+        message: "Target peer not found, offline, or not in the same room",
+        targetId: target,
+      });
       return;
     }
 
-    const caller = users.get(socket.id);
     const callerName = caller ? caller.username : `User-${socket.id.slice(0, 4)}`;
 
     io.to(target).emit("signal:incoming-call", {
+      senderId: socket.id,
       callerId: socket.id,
       callerName,
       metadata,
@@ -846,6 +954,7 @@ function registerSocketHandlers(io, socket) {
 
     // Also emit frontend-compatible alias
     io.to(target).emit("callUser", {
+      senderId: socket.id,
       from: socket.id,
       name: callerName,
       signal: signalData,
@@ -857,16 +966,22 @@ function registerSocketHandlers(io, socket) {
 
   const handleAcceptCall = ({ targetId, to, signal } = {}) => {
     const target = targetId || to;
-    if (!target || !users.has(target)) {
-      socket.emit("signal:error", { message: "Caller peer not found or offline", targetId: target });
+    const callee = users.get(socket.id);
+    const targetUser = users.get(target);
+    if (!target || !targetUser || (callee && callee.roomId !== targetUser.roomId)) {
+      socket.emit("signal:error", {
+        status: "error",
+        message: "Caller peer not found, offline, or not in the same room",
+        targetId: target,
+      });
       return;
     }
 
     const call = registerCall(target, socket.id);
-    const callee = users.get(socket.id);
     const calleeName = callee ? callee.username : `User-${socket.id.slice(0, 4)}`;
 
     io.to(target).emit("signal:call-accepted", {
+      senderId: socket.id,
       peerId: socket.id,
       peerName: calleeName,
       callId: call.callId,
@@ -874,6 +989,7 @@ function registerSocketHandlers(io, socket) {
     });
 
     io.to(target).emit("callAccepted", {
+      senderId: socket.id,
       signal,
       from: socket.id,
     });
@@ -896,39 +1012,60 @@ function registerSocketHandlers(io, socket) {
   });
 
   socket.on("signal:offer", ({ targetId, offer } = {}) => {
-    if (!targetId || !users.has(targetId)) {
-      socket.emit("signal:error", { message: "Target peer not found or disconnected", targetId });
+    const sender = users.get(socket.id);
+    const target = users.get(targetId);
+    if (!targetId || !target || (sender && sender.roomId !== target.roomId)) {
+      socket.emit("signal:error", {
+        status: "error",
+        message: "Target peer not found, disconnected, or not in the same room",
+        targetId,
+      });
       return;
     }
     if (offer) {
       io.to(targetId).emit("signal:offer", {
         senderId: socket.id,
+        from: socket.id,
         offer,
       });
     }
   });
 
   socket.on("signal:answer", ({ targetId, answer } = {}) => {
-    if (!targetId || !users.has(targetId)) {
-      socket.emit("signal:error", { message: "Target peer not found or disconnected", targetId });
+    const sender = users.get(socket.id);
+    const target = users.get(targetId);
+    if (!targetId || !target || (sender && sender.roomId !== target.roomId)) {
+      socket.emit("signal:error", {
+        status: "error",
+        message: "Target peer not found, disconnected, or not in the same room",
+        targetId,
+      });
       return;
     }
     if (answer) {
       io.to(targetId).emit("signal:answer", {
         senderId: socket.id,
+        from: socket.id,
         answer,
       });
     }
   });
 
   socket.on("signal:ice-candidate", ({ targetId, candidate } = {}) => {
-    if (!targetId || !users.has(targetId)) {
-      socket.emit("signal:error", { message: "Target peer not found or disconnected", targetId });
+    const sender = users.get(socket.id);
+    const target = users.get(targetId);
+    if (!targetId || !target || (sender && sender.roomId !== target.roomId)) {
+      socket.emit("signal:error", {
+        status: "error",
+        message: "Target peer not found, disconnected, or not in the same room",
+        targetId,
+      });
       return;
     }
     if (candidate) {
       io.to(targetId).emit("signal:ice-candidate", {
         senderId: socket.id,
+        from: socket.id,
         candidate,
       });
     }
@@ -1079,6 +1216,7 @@ function hasUser(id) {
 function clearUsers() {
   users.clear();
   profiles.clear();
+  roomChatMessages.clear();
   clearActiveCalls();
   initDefaultRooms();
 }
@@ -1119,4 +1257,8 @@ module.exports = {
   saveProfile,
   validateProfileData,
   profiles,
+  // Room Chat system exports
+  saveRoomMessage,
+  getRoomMessages,
+  roomChatMessages,
 };
