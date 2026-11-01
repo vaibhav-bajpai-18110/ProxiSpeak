@@ -1428,7 +1428,7 @@ function registerSocketHandlers(io, socket) {
       });
     }
 
-    socket.broadcast.emit("userDisconnected", socket.id);
+    socket.broadcast.emit("userDisconnected", { id: socket.id, username: disconnectedUser?.username || `Guest-${socket.id.slice(0, 4)}`, roomId: disconnectedUser?.roomId || DEFAULT_ROOM, reason });
 
     socket.broadcast.emit("userLeft", {
       id: socket.id,
