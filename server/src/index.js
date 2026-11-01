@@ -1,4 +1,4 @@
-
+﻿
 const express = require("express");
 const http = require("http");
 const path = require("path");
@@ -15,6 +15,8 @@ const {
   createRoom,
   getProfile,
   saveProfile,
+  getRoomMessages,
+  sanitizeRoomId,
 } = require("./sockets/socketHandlers");
 const databaseService = require("./services/databaseService");
 
@@ -171,6 +173,19 @@ app.post("/api/worlds", async (req, res) => {
 });
 
 // Profile query endpoints
+
+// Room Chat History Endpoint
+app.get("/api/rooms/:roomId/messages", (req, res) => {
+  res.setHeader("Cache-Control", "no-cache");
+  const roomId = sanitizeRoomId(req.params.roomId);
+  res.json({
+    status: "success",
+    roomId,
+    messages: getRoomMessages(roomId),
+  });
+});
+
+// Single Unified Profile Query Handler (Supports :userId path param or query string ?userId=...)
 const handleGetProfile = (req, res) => {
   res.setHeader("Cache-Control", "no-cache");
   const userId = req.params.userId || req.query.userId || req.query.id;

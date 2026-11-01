@@ -302,12 +302,12 @@ npm start
 ```
 Starts Express & Socket.IO server on `http://localhost:5000`.
 
-### Run Automated 24-Module Verification Suite
+### Run Automated 25-Module Verification Suite
 ```bash
 cd server
 npm test
 ```
-Executes all 24 automated integration tests:
+Executes all 25 automated integration tests:
 1. `GET /` (Root route)
 2. `GET /api/health` (Frontend health contract)
 3. `GET /api/status` (Active users and uptime)
@@ -331,7 +331,8 @@ Executes all 24 automated integration tests:
 21. **Room Capacity Enforcement & Full Room Rejection (`maxParticipants`, rejection of overflow users, slot freeing on `leaveRoom`)**
 22. **Multi-Room Multi-User Isolation & Audio Call Teardown on Room Switch (room-scoped movement, cross-room isolation, audio call termination upon switching rooms)**
 23. **Profile REST API, Validation Errors & Real-Time Sync (`GET /api/profile`, `PUT /api/profile`, `updateProfile` socket broadcast, hex color & availability validation)**
-24. **Real-Time Participant Sync, Avatar Movement, User Joining & Leaving Lifecycle Across Multiple Clients (Task 16: Multi-client roster sync, concurrent avatar moves, high-frequency bursts, live updates, and departure cleanup)**
+24. **Real-Time Participant Sync, Avatar Movement, User Joining & Leaving Lifecycle Across Multiple Clients (Multi-client roster sync, concurrent avatar moves, high-frequency bursts, live updates, and departure cleanup)**
+25. **Room Chat Delivery & Same-Room WebRTC Signaling Relays (Socket.IO `chat:send`/`chat:message`, REST `GET /api/rooms/:roomId/messages`, `senderId` inclusion, same-room isolation enforcement)**
 
 ### Interactive Multi-Tab Visual & Audio Demo
 1. Start server: `npm start`
