@@ -13,7 +13,7 @@ The backend is fully integrated with and verified against both the ProxiSpeak Re
 - **WebSocket Engine**: Socket.IO (`^4.8.4`)
 - **Cross-Origin Handling**: CORS (`^2.8.6`)
 - **Environment Management**: `dotenv` (`^18.0.7`)
-- **Automated Verification**: Custom 19-stage end-to-end integration test runner
+- **Automated Verification**: Custom 22-stage end-to-end integration test runner
 
 ---
 
@@ -21,7 +21,7 @@ The backend is fully integrated with and verified against both the ProxiSpeak Re
 ```text
 server/
 ├── public/
-│   └── index.html            # Interactive multi-tab 2D Canvas testing client with proximity indicators
+│   └── index.html            # Interactive multi-tab 2D Canvas testing client with proximity indicators & room controls
 ├── src/
 │   ├── index.js              # Express app, process safety nets, REST APIs, & HTTP server
 │   ├── sockets/
@@ -31,9 +31,10 @@ server/
 ├── .env                      # Environment configurations (PORT=5000)
 ├── .gitignore                # Git exclusion rules
 ├── DAY14_TESTING_AND_BUG_REPORT.md # Day 14 comprehensive QA, multiplayer, reconnection & bug report
+├── DAY15_ROOMS_AND_MULTIPLAYER_REPORT.md # Day 15 room creation, joining, leaving & multi-user report
 ├── package.json              # Package manifest and scripts (start, test)
 ├── test-client.js            # Standalone Socket.IO test client
-├── verify.js                 # Automated 19-stage verification test runner
+├── verify.js                 # Automated 22-stage verification test runner
 └── README.md                 # Complete backend documentation
 ```
 
@@ -84,6 +85,52 @@ PORT=5000
   ```
 - **Status Code**: `200 OK`
 
+### `GET /api/rooms`
+- **Description**: Returns directory listing of all available rooms with live participant counts and metadata.
+- **Response Headers**: `Cache-Control: no-cache`
+- **Response Format**:
+  ```json
+  {
+    "status": "OK",
+    "rooms": [
+      {
+        "id": "main-office",
+        "name": "Main Office",
+        "description": "Central virtual workspace",
+        "maxParticipants": 50,
+        "currentParticipants": 4
+      }
+    ],
+    "timestamp": "2026-11-01T12:00:00.000Z"
+  }
+  ```
+- **Status Code**: `200 OK`
+
+### `POST /api/rooms`
+- **Description**: Creates a new room via REST API with custom name, description, and capacity limit.
+- **Request Body**:
+  ```json
+  {
+    "name": "Design Studio",
+    "description": "UI/UX design room",
+    "maxParticipants": 8
+  }
+  ```
+- **Response Format**:
+  ```json
+  {
+    "status": "created",
+    "room": {
+      "id": "design-studio",
+      "name": "Design Studio",
+      "description": "UI/UX design room",
+      "maxParticipants": 8,
+      "createdAt": "2026-11-01T12:00:00.000Z"
+    }
+  }
+  ```
+- **Status Code**: `201 Created`
+
 ### `GET /demo`
 - **Description**: Serves the standalone 2D Canvas interactive visual client with real-time avatar movement, live room switching, proximity voice range indicators, and multi-tab testing support.
 - **Status Code**: `200 OK`
@@ -118,13 +165,19 @@ PORT=5000
 
 | Event Name | Direction | Payload | Description |
 | :--- | :--- | :--- | :--- |
-| `joinRoom` | Client $\rightarrow$ Server | `{ roomId, username? }` | Switches room with duplicate-join idempotency guard. |
-| `leaveRoom` | Client $\rightarrow$ Server | `{ roomId }` | Leaves room and resets user back to `main-office`. |
+| `createRoom` | Client $\rightarrow$ Server | `{ name, description?, maxParticipants?, roomId? }` | Creates custom room. Rejects duplicates; returns created room metadata and broadcasts `roomListUpdated`. |
+| `roomCreated` | Server $\rightarrow$ Client | `{ id, name, description, maxParticipants, ... }` | Delivered to creator upon successful registration. |
+| `getRooms` | Client $\rightarrow$ Server | None (with callback) | Queries available rooms directory with dynamic `currentParticipants` counts. |
+| `roomList` | Server $\rightarrow$ Client | `Array<RoomMetadata>` | Emitted on connect with full room directory. |
+| `roomListUpdated`| Server $\rightarrow$ Clients | `Array<RoomMetadata>` | Broadcasted when a new room is created or modified. |
+| `joinRoom` | Client $\rightarrow$ Server | `{ roomId, username? }` | Switches room with capacity enforcement, duplicate-join idempotency, and call teardown. |
+| `leaveRoom` | Client $\rightarrow$ Server | `{ roomId? }` | Leaves room, notifies peers, and resets user back to `main-office`. |
 | `currentUsers` | Server $\rightarrow$ Client | `Array<User>` | Emitted on connect with global user snapshot. |
 | `roomParticipants`| Server $\rightarrow$ Client | `{ roomId, participants: [...] }` | Emitted on join/switch with current room member list. |
 | `participantJoined`| Server $\rightarrow$ Room | `{ id, username, roomId, x, y, color }` | Broadcasted to room members when a participant joins. |
 | `userJoined` | Server $\rightarrow$ Clients | `{ id, username, roomId, x, y, color }` | Broadcasted globally when a participant joins. |
 | `participantLeft` | Server $\rightarrow$ Room | `{ id, username, roomId, reason }` | Broadcasted to room members when a participant leaves. |
+| `error:room` | Server $\rightarrow$ Client | `{ message, roomId?, maxParticipants? }` | Emitted when room is full, already exists, or action fails. |
 
 ### Spatial Positioning & Movement
 
@@ -249,12 +302,12 @@ npm start
 ```
 Starts Express & Socket.IO server on `http://localhost:5000`.
 
-### Run Automated 19-Module Verification Suite
+### Run Automated 22-Module Verification Suite
 ```bash
 cd server
 npm test
 ```
-Executes all 19 automated integration tests:
+Executes all 22 automated integration tests:
 1. `GET /` (Root route)
 2. `GET /api/health` (Frontend health contract)
 3. `GET /api/status` (Active users and uptime)
@@ -271,9 +324,12 @@ Executes all 19 automated integration tests:
 14. Unexpected disconnections & abrupt transport teardown handling
 15. Exhaustive invalid inputs battery & crash resistance
 16. Simultaneous multi-user virtual office interaction & spatial proximity calculations
-17. **WebRTC Audio Calling Full Handshake & Bidirectional Signaling (`call-user` $\rightarrow$ `accept-call` $\rightarrow$ `offer`/`answer` $\rightarrow$ `ice-candidate` $\rightarrow$ `mute-status` $\rightarrow$ `end-call`)**
-18. **Mid-Call Abrupt Disconnection & Communication State Cleanup (instant peer teardown notification & zombie call prevention)**
-19. **WebRTC Error Handling & Post-Reconnection Call Recovery (offline peer rejection, self-call blocking, call decline, and reconnection resumption)**
+17. WebRTC Audio Calling Full Handshake & Bidirectional Signaling (`call-user` $\rightarrow$ `accept-call` $\rightarrow$ `offer`/`answer` $\rightarrow$ `ice-candidate` $\rightarrow$ `mute-status` $\rightarrow$ `end-call`)
+18. Mid-Call Abrupt Disconnection & Communication State Cleanup (instant peer teardown notification & zombie call prevention)
+19. WebRTC Error Handling & Post-Reconnection Call Recovery (offline peer rejection, self-call blocking, call decline, and reconnection resumption)
+20. **Room Creation, Directory Listing & REST Endpoints (Socket.IO `createRoom`, `getRooms`, duplicate blocking, REST `GET /api/rooms` and `POST /api/rooms`)**
+21. **Room Capacity Enforcement & Full Room Rejection (`maxParticipants`, rejection of overflow users, slot freeing on `leaveRoom`)**
+22. **Multi-Room Multi-User Isolation & Audio Call Teardown on Room Switch (room-scoped movement, cross-room isolation, audio call termination upon switching rooms)**
 
 ### Interactive Multi-Tab Visual & Audio Demo
 1. Start server: `npm start`

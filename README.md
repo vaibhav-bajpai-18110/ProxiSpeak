@@ -15,7 +15,8 @@ proxyspeak/
 │   │   ├── sockets/          # Real-time Socket.IO room, movement, proximity & WebRTC handlers
 │   │   └── services/         # Spatial proximity, audio rolloff & stereo panning calculations
 │   ├── DAY14_TESTING_AND_BUG_REPORT.md # Comprehensive Day 14 QA, multiplayer, reconnect & bug report
-│   ├── verify.js             # Automated 19-module integration test suite
+│   ├── DAY15_ROOMS_AND_MULTIPLAYER_REPORT.md # Day 15 room creation, joining, leaving & multi-user report
+│   ├── verify.js             # Automated 22-module integration test suite
 │   ├── package.json          # Dependencies and scripts (start, test)
 │   └── README.md             # Complete backend API, Socket.IO & proximity documentation
 └── README.md                 # Project overview & quick start
@@ -42,7 +43,7 @@ The server will start on `http://localhost:5000`.
 cd server
 npm test
 ```
-Runs the comprehensive 19-module verification suite covering:
+Runs the comprehensive 22-module verification suite covering:
 - REST API contracts (`/api/health`, `/api/status`, root, and 404 handler)
 - Socket.IO connection and ping-pong latency checks
 - Real-time multi-client avatar position synchronization
@@ -54,9 +55,12 @@ Runs the comprehensive 19-module verification suite covering:
 - Unexpected disconnections & abrupt transport drop recovery
 - Exhaustive invalid inputs and edge-case crash resistance
 - Simultaneous multi-user virtual office interaction & spatial proximity calculations
-- **WebRTC Audio Calling Full Handshake & Bidirectional Signaling (`call-user` $\rightarrow$ `accept-call` $\rightarrow$ `offer`/`answer` $\rightarrow$ `ice-candidate` $\rightarrow$ `mute-status` $\rightarrow$ `end-call`)**
-- **Mid-Call Abrupt Disconnection & Communication State Cleanup (instant peer teardown notification & zombie call prevention)**
-- **WebRTC Error Handling & Post-Reconnection Call Recovery (offline peer rejection, self-call blocking, call decline, and reconnection resumption)**
+- WebRTC Audio Calling Full Handshake & Bidirectional Signaling (`call-user` $\rightarrow$ `accept-call` $\rightarrow$ `offer`/`answer` $\rightarrow$ `ice-candidate` $\rightarrow$ `mute-status` $\rightarrow$ `end-call`)
+- Mid-Call Abrupt Disconnection & Communication State Cleanup (instant peer teardown notification & zombie call prevention)
+- WebRTC Error Handling & Post-Reconnection Call Recovery (offline peer rejection, self-call blocking, call decline, and reconnection resumption)
+- **Room Creation, Directory Listing & REST Endpoints (Socket.IO `createRoom`, `getRooms`, duplicate blocking, REST `GET /api/rooms` and `POST /api/rooms`)**
+- **Room Capacity Enforcement & Full Room Rejection (`maxParticipants`, rejection of overflow users, slot freeing on `leaveRoom`)**
+- **Multi-Room Multi-User Isolation & Audio Call Teardown on Room Switch (room-scoped movement, cross-room isolation, audio call termination upon switching rooms)**
 
 ### 4. Interactive Multi-Tab Visual & Audio Demo
 Open [http://localhost:5000/demo](http://localhost:5000/demo) in two or three separate browser tabs to test real-time avatar movement, audio calling between peers, incoming call banners, mute toggles, and instant disconnect cleanup!

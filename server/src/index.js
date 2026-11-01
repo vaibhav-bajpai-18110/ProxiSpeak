@@ -5,7 +5,12 @@ const cors = require("cors");
 const { Server } = require("socket.io");
 require("dotenv").config();
 
-const { registerSocketHandlers, getUserCount } = require("./sockets/socketHandlers");
+const {
+  registerSocketHandlers,
+  getUserCount,
+  getRoomsList,
+  createRoom,
+} = require("./sockets/socketHandlers");
 
 // Process-level error safety nets to prevent server crashes
 process.on("unhandledRejection", (err) => {
@@ -69,6 +74,27 @@ app.get("/api/status", (req, res) => {
     activeUsers: getUserCount(),
     timestamp: new Date().toISOString(),
   });
+});
+
+// Room Directory Listing Endpoint
+app.get("/api/rooms", (req, res) => {
+  res.setHeader("Cache-Control", "no-cache");
+  res.json({
+    status: "OK",
+    rooms: getRoomsList(),
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// Room Creation Endpoint
+app.post("/api/rooms", (req, res) => {
+  const { roomId, name, description, maxParticipants, isPrivate } = req.body || {};
+  const result = createRoom({ roomId, name, description, maxParticipants, isPrivate }, "api");
+  if (!result.success) {
+    return res.status(400).json({ error: result.error, roomId: result.roomId });
+  }
+  io.emit("roomListUpdated", getRoomsList());
+  res.status(201).json({ status: "created", room: result.room });
 });
 
 // 404 Handler for unknown routes

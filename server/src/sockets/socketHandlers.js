@@ -139,6 +139,74 @@ const MAP_BOUNDS = {
 // Default room for all incoming connections
 const DEFAULT_ROOM = "main-office";
 
+// In-memory store of rooms: roomId -> { id, name, description, maxParticipants, isPrivate, isDefault, createdBy, createdAt }
+const rooms = new Map();
+
+const DEFAULT_ROOMS = [
+  { id: "main-office", name: "Main Office", description: "Central virtual workspace", maxParticipants: 50, isDefault: true },
+  { id: "meeting-room-a", name: "Meeting Room A", description: "Focus & presentation room", maxParticipants: 10, isDefault: false },
+  { id: "meeting-room-b", name: "Meeting Room B", description: "Collaborative breakout space", maxParticipants: 10, isDefault: false },
+  { id: "lounge", name: "Lounge / Cafeteria", description: "Casual watercooler chat", maxParticipants: 25, isDefault: false },
+];
+
+function initDefaultRooms() {
+  rooms.clear();
+  DEFAULT_ROOMS.forEach((r) => {
+    rooms.set(r.id, { ...r, isPrivate: false, createdBy: "system", createdAt: new Date().toISOString() });
+  });
+}
+initDefaultRooms();
+
+function getRoomsList() {
+  return Array.from(rooms.values()).map((r) => ({
+    ...r,
+    currentParticipants: getRoomParticipants(r.id).length,
+  }));
+}
+
+function getRoomMeta(roomId) {
+  if (rooms.has(roomId)) {
+    return rooms.get(roomId);
+  }
+  const autoRoom = {
+    id: roomId,
+    name: roomId.replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
+    description: "Dynamic office room",
+    maxParticipants: 25,
+    isPrivate: false,
+    isDefault: roomId === DEFAULT_ROOM,
+    createdBy: "dynamic",
+    createdAt: new Date().toISOString(),
+  };
+  rooms.set(roomId, autoRoom);
+  return autoRoom;
+}
+
+function createRoom({ roomId, name, description, maxParticipants, isPrivate = false } = {}, creatorId = "system") {
+  const sanitizedId = sanitizeRoomId(roomId || name || `room-${Date.now()}`);
+  const sanitizedName = (typeof name === "string" && name.trim()) ? name.trim().slice(0, 50) : sanitizedId;
+  const sanitizedDesc = typeof description === "string" ? description.trim().slice(0, 200) : "";
+  const maxCap = (typeof maxParticipants === "number" && maxParticipants > 0) ? Math.min(100, Math.max(2, Math.round(maxParticipants))) : 25;
+
+  if (rooms.has(sanitizedId)) {
+    return { success: false, error: "Room already exists", roomId: sanitizedId };
+  }
+
+  const roomRecord = {
+    id: sanitizedId,
+    name: sanitizedName,
+    description: sanitizedDesc,
+    maxParticipants: maxCap,
+    isPrivate: Boolean(isPrivate),
+    isDefault: sanitizedId === DEFAULT_ROOM,
+    createdBy: creatorId,
+    createdAt: new Date().toISOString(),
+  };
+
+  rooms.set(sanitizedId, roomRecord);
+  return { success: true, room: roomRecord };
+}
+
 // Color palette for distinguishing users in the 2D space
 const AVATAR_COLORS = [
   "#3B82F6", // Blue
@@ -173,7 +241,7 @@ function sanitizeUsername(input, defaultName) {
 
 function sanitizeRoomId(roomId) {
   if (typeof roomId !== "string") return DEFAULT_ROOM;
-  const clean = roomId.trim().toLowerCase().replace(/[^a-z0-9-_]/g, "");
+  const clean = roomId.trim().toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-_]/g, "");
   return clean.length > 0 ? clean.slice(0, 50) : DEFAULT_ROOM;
 }
 
@@ -193,9 +261,9 @@ function getRoomParticipants(roomId) {
 /**
  * Internal logic for joining or switching rooms
  */
-function executeRoomJoin(socket, targetRoomId, newUsername) {
+function executeRoomJoin(socket, targetRoomId, newUsername, io) {
   const user = users.get(socket.id);
-  if (!user) return;
+  if (!user) return false;
 
   const targetRoom = sanitizeRoomId(targetRoomId || DEFAULT_ROOM);
   const oldRoom = user.roomId;
@@ -207,7 +275,7 @@ function executeRoomJoin(socket, targetRoomId, newUsername) {
       roomId: targetRoom,
       participants: getRoomParticipants(targetRoom),
     });
-    return;
+    return true;
   }
 
   // Same room, username change only
@@ -220,8 +288,26 @@ function executeRoomJoin(socket, targetRoomId, newUsername) {
       roomId: targetRoom,
       participants: getRoomParticipants(targetRoom),
     });
-    return;
+    return true;
   }
+
+  // Room Capacity Enforcement
+  const roomMeta = getRoomMeta(targetRoom);
+  if (roomMeta && typeof roomMeta.maxParticipants === "number" && oldRoom !== targetRoom) {
+    const currentCount = getRoomParticipants(targetRoom).length;
+    if (currentCount >= roomMeta.maxParticipants) {
+      socket.emit("error:room", {
+        message: "Room is full",
+        roomId: targetRoom,
+        maxParticipants: roomMeta.maxParticipants,
+        currentCount,
+      });
+      return false;
+    }
+  }
+
+  // Terminate any active calls from old room when switching rooms (prevents cross-room zombie audio calls)
+  cleanupUserCalls(socket.id, io, "room_switched");
 
   // Room Switch: Leave old room and announce departure
   socket.leave(oldRoom);
@@ -229,6 +315,7 @@ function executeRoomJoin(socket, targetRoomId, newUsername) {
     id: socket.id,
     username: user.username,
     roomId: oldRoom,
+    reason: "room_switched",
   });
 
   // Join new room
@@ -246,6 +333,7 @@ function executeRoomJoin(socket, targetRoomId, newUsername) {
 
   socket.to(targetRoom).emit("participantJoined", user);
   socket.broadcast.emit("userJoined", user);
+  return true;
 }
 
 /**
@@ -288,7 +376,8 @@ function handleUpdatePosition(socket, positionData) {
       color: currentUser.color,
     };
 
-    // Broadcast position update to peers without echo back to sender
+    // Broadcast position update to peers: room-scoped and backward-compatible global broadcast
+    socket.to(currentUser.roomId).emit("roomPositionUpdated", updatePayload);
     socket.broadcast.emit("userPositionUpdated", updatePayload);
     socket.broadcast.emit("userMoved", updatePayload);
   } catch (err) {
@@ -335,24 +424,86 @@ function registerSocketHandlers(io, socket) {
     participants: getRoomParticipants(DEFAULT_ROOM),
   });
   socket.emit("currentUsers", Array.from(users.values()));
+  socket.emit("roomList", getRoomsList());
 
   // 3. Broadcast to peers that a participant/user joined
   socket.to(DEFAULT_ROOM).emit("participantJoined", defaultUser);
   socket.broadcast.emit("userJoined", defaultUser);
 
-  // 4. Room Join / Switch Handler with Duplicate Join Protection
-  socket.on("joinRoom", (data = {}) => {
+  // 4. Room Creation Handler
+  socket.on("createRoom", (data = {}, callback) => {
     try {
+      if (!data || typeof data !== "object") {
+        const errPayload = { success: false, message: "Invalid payload for createRoom" };
+        if (typeof callback === "function") callback(errPayload);
+        else socket.emit("error:room", errPayload);
+        return;
+      }
+
+      const result = createRoom(data, socket.id);
+      if (!result.success) {
+        if (typeof callback === "function") callback(result);
+        else socket.emit("error:room", { message: result.error, roomId: result.roomId });
+        return;
+      }
+
+      socket.emit("roomCreated", result.room);
+      if (typeof callback === "function") callback({ success: true, room: result.room });
+      io.emit("roomListUpdated", getRoomsList());
+    } catch (err) {
+      console.error(`[CREATE ROOM ERROR] ${socket.id}:`, err.message);
+      const errPayload = { success: false, message: "Internal error creating room" };
+      if (typeof callback === "function") callback(errPayload);
+      else socket.emit("error:room", errPayload);
+    }
+  });
+
+  // Room Directory Query
+  socket.on("getRooms", (callback) => {
+    const list = getRoomsList();
+    if (typeof callback === "function") {
+      callback({ success: true, rooms: list });
+    } else {
+      socket.emit("roomList", list);
+    }
+  });
+
+  // 5. Room Join / Switch Handler with Duplicate Join Protection & Capacity Enforcement
+  socket.on("joinRoom", (data = {}, callback) => {
+    try {
+      let targetRoomId = DEFAULT_ROOM;
+      let targetUsername = null;
+
       if (data && typeof data === "object") {
-        executeRoomJoin(socket, data.roomId, data.username);
+        targetRoomId = data.roomId;
+        targetUsername = data.username;
       } else if (typeof data === "string") {
-        executeRoomJoin(socket, data, null);
+        targetRoomId = data;
       } else {
-        socket.emit("error:validation", { message: "Invalid joinRoom payload" });
+        const errPayload = { success: false, message: "Invalid joinRoom payload" };
+        if (typeof callback === "function") callback(errPayload);
+        else socket.emit("error:validation", errPayload);
+        return;
+      }
+
+      const success = executeRoomJoin(socket, targetRoomId, targetUsername, io);
+      if (typeof callback === "function") {
+        if (success === false) {
+          callback({ success: false, message: "Room join failed (full or invalid)", roomId: targetRoomId });
+        } else {
+          const finalRoom = sanitizeRoomId(targetRoomId);
+          callback({
+            success: true,
+            roomId: finalRoom,
+            participants: getRoomParticipants(finalRoom),
+          });
+        }
       }
     } catch (err) {
       console.error(`[JOIN ROOM ERROR] ${socket.id}:`, err.message);
-      socket.emit("error:validation", { message: "Failed to join room" });
+      const errPayload = { success: false, message: "Failed to join room" };
+      if (typeof callback === "function") callback(errPayload);
+      else socket.emit("error:validation", errPayload);
     }
   });
 
@@ -364,7 +515,7 @@ function registerSocketHandlers(io, socket) {
       const targetUsername = parsedData.username ? sanitizeUsername(parsedData.username, user.username) : user.username;
 
       if (parsedData.roomId) {
-        executeRoomJoin(socket, parsedData.roomId, targetUsername);
+        executeRoomJoin(socket, parsedData.roomId, targetUsername, io);
         return;
       }
 
@@ -382,18 +533,27 @@ function registerSocketHandlers(io, socket) {
     }
   });
 
-  // 5. Leave Room Handler
-  socket.on("leaveRoom", (data = {}) => {
+  // 6. Leave Room Handler
+  socket.on("leaveRoom", (data = {}, callback) => {
     try {
       const user = users.get(socket.id);
-      if (!user) return;
+      if (!user) {
+        if (typeof callback === "function") callback({ success: false, message: "User not found" });
+        return;
+      }
 
       const roomPayload = (data && typeof data === "object") ? data : {};
       const roomToLeave = sanitizeRoomId(roomPayload.roomId || user.roomId);
 
       if (roomToLeave === DEFAULT_ROOM) {
+        if (typeof callback === "function") {
+          callback({ success: true, roomId: DEFAULT_ROOM, message: "Already in default room" });
+        }
         return;
       }
+
+      // Terminate any active calls with peers in the room being left
+      cleanupUserCalls(socket.id, io, "room_left");
 
       socket.leave(roomToLeave);
 
@@ -401,6 +561,7 @@ function registerSocketHandlers(io, socket) {
         id: socket.id,
         username: user.username,
         roomId: roomToLeave,
+        reason: "user_left_room",
       });
 
       // Revert to default room
@@ -413,12 +574,17 @@ function registerSocketHandlers(io, socket) {
         participants: getRoomParticipants(DEFAULT_ROOM),
       });
       socket.to(DEFAULT_ROOM).emit("participantJoined", user);
+
+      if (typeof callback === "function") {
+        callback({ success: true, leftRoom: roomToLeave, currentRoom: DEFAULT_ROOM });
+      }
     } catch (err) {
       console.error(`[LEAVE ROOM ERROR] ${socket.id}:`, err.message);
+      if (typeof callback === "function") callback({ success: false, message: err.message });
     }
   });
 
-  // 6. Get participants for a room
+  // 7. Get participants for a room
   socket.on("getParticipants", (data = {}, callback) => {
     const roomPayload = (data && typeof data === "object") ? data : {};
     const roomId = sanitizeRoomId(roomPayload.roomId || DEFAULT_ROOM);
@@ -698,11 +864,18 @@ function hasUser(id) {
 function clearUsers() {
   users.clear();
   clearActiveCalls();
+  initDefaultRooms();
 }
 
 module.exports = {
   registerSocketHandlers,
   users,
+  rooms,
+  DEFAULT_ROOMS,
+  createRoom,
+  getRoomsList,
+  getRoomMeta,
+  initDefaultRooms,
   activeAudioCalls,
   userCallMap,
   registerCall,
