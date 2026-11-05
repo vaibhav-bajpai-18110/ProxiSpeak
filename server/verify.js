@@ -361,6 +361,7 @@ async function testMultipleSimultaneousConnections(serverUrl, clientCount = 6) {
     } catch (err) {
       clearTimeout(timeout);
       clients.forEach((c) => c.disconnect());
+      await new Promise((r) => setTimeout(r, 300));
       reject(err);
     }
   });
@@ -658,6 +659,8 @@ async function testUnexpectedDisconnection(serverUrl) {
 
       clearTimeout(timeout);
       observerTab.disconnect();
+      droppedTab.disconnect();
+      await new Promise((r) => setTimeout(r, 200));
 
       const statusRes = await checkUrl(`${serverUrl}/api/status`);
       const statusJson = JSON.parse(statusRes.body);
@@ -813,6 +816,7 @@ async function testSimultaneousVirtualOfficeInteraction(serverUrl) {
 
       clearTimeout(timeout);
       clients.forEach((c) => c.disconnect());
+      await new Promise((r) => setTimeout(r, 300));
 
       resolve({
         activeUsersCount: statusJson.activeUsers,
@@ -822,6 +826,7 @@ async function testSimultaneousVirtualOfficeInteraction(serverUrl) {
     } catch (err) {
       clearTimeout(timeout);
       clients.forEach((c) => c.disconnect());
+      await new Promise((r) => setTimeout(r, 300));
       reject(err);
     }
   });
@@ -1054,6 +1059,8 @@ async function testMidCallAbruptDisconnectionCleanup(serverUrl) {
 
       clearTimeout(timeout);
       callee.disconnect();
+      caller.disconnect();
+      await new Promise((r) => setTimeout(r, 200));
 
       resolve({
         callEndedReceivedByCallee,
@@ -1470,6 +1477,7 @@ async function testMultiRoomIsolationAndCallTeardownOnSwitch(serverUrl) {
 
       clearTimeout(timeout);
       clients.forEach((c) => c.disconnect());
+      await new Promise((r) => setTimeout(r, 300));
 
       resolve({
         roomAIsolated,
@@ -1483,6 +1491,7 @@ async function testMultiRoomIsolationAndCallTeardownOnSwitch(serverUrl) {
     } catch (err) {
       clearTimeout(timeout);
       clients.forEach((c) => c.disconnect());
+      await new Promise((r) => setTimeout(r, 300));
       reject(err);
     }
   });
@@ -1775,6 +1784,7 @@ async function testRealtimeParticipantSyncAndMovementLifecycle(serverUrl) {
 
       clearTimeout(timeout);
       clients.forEach((c) => c.disconnect());
+      await new Promise((r) => setTimeout(r, 300));
 
       resolve({
         step1JoinSyncSuccess,
@@ -1788,6 +1798,7 @@ async function testRealtimeParticipantSyncAndMovementLifecycle(serverUrl) {
     } catch (err) {
       clearTimeout(timeout);
       clients.forEach((c) => c.disconnect());
+      await new Promise((r) => setTimeout(r, 300));
       reject(err);
     }
   });
@@ -1913,6 +1924,7 @@ async function testRoomChatAndSameRoomWebRTCRelays(serverUrl) {
 
       clearTimeout(timeout);
       clients.forEach((c) => c.disconnect());
+      await new Promise((r) => setTimeout(r, 300));
 
       resolve({
         chatDeliverySuccess,
@@ -1924,6 +1936,274 @@ async function testRoomChatAndSameRoomWebRTCRelays(serverUrl) {
     } catch (err) {
       clearTimeout(timeout);
       clients.forEach((c) => c.disconnect());
+      await new Promise((r) => setTimeout(r, 300));
+      reject(err);
+    }
+  });
+}
+
+// Test 26: Socket.IO Reconnection Behaviour, Temporary Disconnections, Recovery & State Synchronization (Task 17)
+async function testSocketReconnectionRecoveryAndSynchronization(serverUrl) {
+  return new Promise(async (resolve, reject) => {
+    let clientA = null;
+    let clientB = null;
+    let reconnectedClientA = null;
+
+    const timeout = setTimeout(() => {
+      if (clientA) clientA.disconnect();
+      if (clientB) clientB.disconnect();
+      if (reconnectedClientA) reconnectedClientA.disconnect();
+      reject(new Error("Socket.IO reconnection recovery and sync test timed out"));
+    }, 12000);
+
+    try {
+      // Step 1: Initial connections for Client A and Client B in "main-office"
+      clientA = io(serverUrl, {
+        transports: ["websocket", "polling"],
+        timeout: 5000,
+        auth: { userId: "user-alice-17", username: "AliceInitial", roomId: "main-office" },
+      });
+      clientB = io(serverUrl, {
+        transports: ["websocket", "polling"],
+        timeout: 5000,
+        auth: { userId: "user-bob-17", username: "BobPeer", roomId: "main-office" },
+      });
+
+      await Promise.all([
+        new Promise((res, rej) => { clientA.once("connect", res); clientA.once("connect_error", rej); }),
+        new Promise((res, rej) => { clientB.once("connect", res); clientB.once("connect_error", rej); }),
+      ]);
+
+      const initialSocketIdA = clientA.id;
+      const initialSocketIdB = clientB.id;
+
+      // Alice updates profile with distinct avatarColor and availability
+      let profileUpdatedOk = false;
+      await new Promise((res) => {
+        clientA.emit("updateProfile", {
+          username: "AliceRecovered",
+          avatarColor: "#9b5de5",
+          availability: "busy",
+        }, (resData) => {
+          if (resData && resData.status === "success" && resData.profile.avatarColor === "#9b5de5") {
+            profileUpdatedOk = true;
+          }
+          res();
+        });
+      });
+
+      await new Promise((r) => setTimeout(r, 200));
+
+      // Step 2: Trigger temporary disconnection on Client A via engine.close()
+      let clientBReceivedParticipantLeft = false;
+      let leftReasonCaptured = null;
+      clientB.once("participantLeft", (data) => {
+        if (data.id === initialSocketIdA) {
+          clientBReceivedParticipantLeft = true;
+          leftReasonCaptured = data.reason;
+        }
+      });
+
+      let clientBReceivedUserDisconnected = false;
+      clientB.once("userDisconnected", (data) => {
+        const id = typeof data === "string" ? data : data?.id;
+        if (id === initialSocketIdA) {
+          clientBReceivedUserDisconnected = true;
+        }
+      });
+
+      // Simulate network blip / sudden socket transport drop
+      clientA.io.engine.close();
+
+      await new Promise((r) => setTimeout(r, 500));
+
+      // Step 3: Verify server active users count drops to 1 (only Bob)
+      const midStatusRes = await checkUrl(`${serverUrl}/api/status`);
+      const midStatusJson = JSON.parse(midStatusRes.body);
+      const activeUsersAfterDrop = midStatusJson.activeUsers;
+
+      // Disconnect old clientA instance to prevent background auto-reconnection loop
+      clientA.disconnect();
+
+      // Step 4: Reconnect Client A (session recovery with userId "user-alice-17")
+      reconnectedClientA = io(serverUrl, {
+        transports: ["websocket", "polling"],
+        timeout: 5000,
+        auth: { userId: "user-alice-17", roomId: "main-office" },
+      });
+
+      let connectionAckReceived = null;
+      reconnectedClientA.once("connectionAck", (ack) => {
+        connectionAckReceived = ack;
+      });
+
+      let clientBReceivedParticipantJoined = false;
+      clientB.once("participantJoined", (user) => {
+        if (user.id === reconnectedClientA.id || user.username === "AliceRecovered") {
+          clientBReceivedParticipantJoined = true;
+        }
+      });
+
+      await new Promise((res, rej) => {
+        reconnectedClientA.once("connect", res);
+        reconnectedClientA.once("connect_error", rej);
+      });
+
+      await new Promise((r) => setTimeout(r, 300));
+
+      const newSocketIdA = reconnectedClientA.id;
+      const socketIdRotated = (newSocketIdA !== initialSocketIdA);
+      const ackValid = Boolean(
+        connectionAckReceived &&
+        connectionAckReceived.status === "connected" &&
+        connectionAckReceived.socketId === newSocketIdA &&
+        connectionAckReceived.user?.color === "#9b5de5" &&
+        connectionAckReceived.user?.status === "busy"
+      );
+
+      // Step 5: Post-Reconnection Roster Synchronization
+      let rosterSyncSuccess = false;
+      await new Promise((res) => {
+        reconnectedClientA.emit("syncState", { roomId: "main-office" }, (state) => {
+          if (
+            state &&
+            state.status === "synced" &&
+            Array.isArray(state.participants) &&
+            state.participants.some((p) => p.id === newSocketIdA) &&
+            state.participants.some((p) => p.id === initialSocketIdB)
+          ) {
+            rosterSyncSuccess = true;
+          }
+          res();
+        });
+      });
+
+      // Step 6: Post-Reconnection Bidirectional Avatar Movement Sync
+      let clientBReceivedMove = null;
+      clientB.once("roomPositionUpdated", (data) => {
+        clientBReceivedMove = data;
+      });
+
+      reconnectedClientA.emit("updatePosition", { x: 260, y: 360, roomId: "main-office" });
+      await new Promise((r) => setTimeout(r, 250));
+
+      let clientAReceivedMove = null;
+      reconnectedClientA.once("roomPositionUpdated", (data) => {
+        clientAReceivedMove = data;
+      });
+
+      clientB.emit("updatePosition", { x: 420, y: 520, roomId: "main-office" });
+      await new Promise((r) => setTimeout(r, 250));
+
+      const movementSyncSuccess = Boolean(
+        clientBReceivedMove &&
+        clientBReceivedMove.id === newSocketIdA &&
+        clientBReceivedMove.x === 260 &&
+        clientBReceivedMove.y === 360 &&
+        clientAReceivedMove &&
+        clientAReceivedMove.id === initialSocketIdB &&
+        clientAReceivedMove.x === 420 &&
+        clientAReceivedMove.y === 520
+      );
+
+      // Step 7: Post-Reconnection Room Chat Catch-Up & Delivery
+      let clientAReceivedChatMessage = null;
+      reconnectedClientA.once("chat:message", (msg) => {
+        clientAReceivedChatMessage = msg;
+      });
+
+      clientB.emit("chat:send", { roomId: "main-office", message: "Welcome back Alice!" });
+      await new Promise((r) => setTimeout(r, 250));
+
+      let clientBReceivedReplyMessage = null;
+      clientB.once("chat:message", (msg) => {
+        clientBReceivedReplyMessage = msg;
+      });
+
+      reconnectedClientA.emit("chat:send", { roomId: "main-office", message: "Thanks Bob, fully synced!" });
+      await new Promise((r) => setTimeout(r, 250));
+
+      let chatHistoryMessages = [];
+      await new Promise((res) => {
+        reconnectedClientA.emit("chat:history", { roomId: "main-office" }, (data) => {
+          if (data && data.status === "success" && Array.isArray(data.messages)) {
+            chatHistoryMessages = data.messages;
+          }
+          res();
+        });
+      });
+
+      const chatSyncSuccess = Boolean(
+        clientAReceivedChatMessage &&
+        clientAReceivedChatMessage.message === "Welcome back Alice!" &&
+        clientBReceivedReplyMessage &&
+        clientBReceivedReplyMessage.message === "Thanks Bob, fully synced!" &&
+        chatHistoryMessages.length >= 2
+      );
+
+      // Step 8: Post-Reconnection WebRTC Calling Resumption
+      let callAcceptedOk = false;
+      const calleeAnswerPromise = new Promise((res) => {
+        clientB.once("signal:incoming-call", (callData) => {
+          if (callData.callerId === newSocketIdA) {
+            clientB.emit("signal:accept-call", { targetId: newSocketIdA });
+          }
+          res();
+        });
+      });
+
+      const callerAcceptPromise = new Promise((res) => {
+        reconnectedClientA.once("signal:call-accepted", (data) => {
+          if (data.peerId === initialSocketIdB) {
+            callAcceptedOk = true;
+          }
+          res();
+        });
+      });
+
+      reconnectedClientA.emit("signal:call-user", { targetId: initialSocketIdB });
+      await calleeAnswerPromise;
+      await callerAcceptPromise;
+
+      // Clean up call
+      reconnectedClientA.emit("signal:end-call", { targetId: initialSocketIdB });
+      await new Promise((r) => setTimeout(r, 150));
+
+      // Step 9: State Purity & Zombie Prevention
+      const statusResFinal = await checkUrl(`${serverUrl}/api/status`);
+      const statusJsonFinal = JSON.parse(statusResFinal.body);
+      const activeUsersBeforeDisconnect = statusJsonFinal.activeUsers;
+
+      clearTimeout(timeout);
+      clientA.disconnect();
+      clientB.disconnect();
+      reconnectedClientA.disconnect();
+      await new Promise((r) => setTimeout(r, 400));
+
+      const statusResZero = await checkUrl(`${serverUrl}/api/status`);
+      const statusJsonZero = JSON.parse(statusResZero.body);
+      const finalActiveUsersZero = statusJsonZero.activeUsers;
+
+      resolve({
+        profileUpdatedOk,
+        clientBReceivedParticipantLeft,
+        clientBReceivedUserDisconnected,
+        activeUsersAfterDrop,
+        socketIdRotated,
+        ackValid,
+        clientBReceivedParticipantJoined,
+        rosterSyncSuccess,
+        movementSyncSuccess,
+        chatSyncSuccess,
+        callAcceptedOk,
+        activeUsersBeforeDisconnect,
+        finalActiveUsersZero,
+      });
+    } catch (err) {
+      clearTimeout(timeout);
+      if (clientA) clientA.disconnect();
+      if (clientB) clientB.disconnect();
+      if (reconnectedClientA) reconnectedClientA.disconnect();
       reject(err);
     }
   });
@@ -2329,6 +2609,38 @@ async function runTest() {
       hasErrors = true;
     }
 
+    // 26. Socket.IO Reconnection Behaviour, Temporary Disconnections, Recovery & State Synchronization (Task 17)
+    await new Promise((r) => setTimeout(r, 400));
+    console.log("\n--- [26] Testing Socket.IO Reconnection Behaviour, Recovery & State Synchronization (Task 17) ---");
+    const reconnectResult = await testSocketReconnectionRecoveryAndSynchronization("http://localhost:5000");
+    if (
+      reconnectResult.profileUpdatedOk &&
+      reconnectResult.clientBReceivedParticipantLeft &&
+      reconnectResult.activeUsersAfterDrop === 1 &&
+      reconnectResult.socketIdRotated &&
+      reconnectResult.ackValid &&
+      reconnectResult.clientBReceivedParticipantJoined &&
+      reconnectResult.rosterSyncSuccess &&
+      reconnectResult.movementSyncSuccess &&
+      reconnectResult.chatSyncSuccess &&
+      reconnectResult.callAcceptedOk &&
+      reconnectResult.activeUsersBeforeDisconnect === 2 &&
+      reconnectResult.finalActiveUsersZero === 0
+    ) {
+      console.log("--> PASS: Sudden socket transport drop detected and peer notified with participantLeft.");
+      console.log("--> PASS: Immediate memory pruning on disconnect (active users accurately reduced to 1).");
+      console.log("--> PASS: Connection recovery verified with new socket ID and session connectionAck.");
+      console.log("--> PASS: Session profile preservation verified (restored custom avatar color and status).");
+      console.log("--> PASS: Post-reconnection roster synchronization verified via syncState.");
+      console.log("--> PASS: Post-reconnection bidirectional avatar movement synchronized without packet drop.");
+      console.log("--> PASS: Post-reconnection room chat delivery and history catch-up verified.");
+      console.log("--> PASS: WebRTC signaling handshake successfully resumed between reconnected client and peer.");
+      console.log("--> PASS: Zero ghost/zombie sockets; active users counter normalized to 0 on final disconnect.");
+    } else {
+      console.error("--> FAIL: Socket.IO reconnection recovery and synchronization test failed:", reconnectResult);
+      hasErrors = true;
+    }
+
   } catch (err) {
     console.error("\n[TEST RUNNER EXCEPTION]:", err.message || err);
     hasErrors = true;
@@ -2342,7 +2654,7 @@ async function runTest() {
       console.error("\n❌ VERIFICATION FAILED: One or more tests did not pass.\n");
       process.exit(1);
     } else {
-      console.log("\n✅ ALL TESTS PASSED: All 25 backend modules, room chat delivery, same-room WebRTC relays, profile sync, and lifecycle verified.\n");
+      console.log("\n✅ ALL TESTS PASSED: All 26 backend modules, reconnection recovery, room chat delivery, WebRTC relays, profile sync, and lifecycle verified.\n");
       process.exit(0);
     }
   }
