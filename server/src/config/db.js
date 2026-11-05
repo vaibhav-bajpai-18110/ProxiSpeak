@@ -1,14 +1,32 @@
 const mongoose = require("mongoose");
 
-async function connectDB() {
-  const mongoURI = process.env.MONGODB_URI;
+const DEFAULT_MONGO_URI = "mongodb://127.0.0.1:27017/proxispeak";
 
-  if (!mongoURI) {
-    throw new Error("MONGODB_URI is missing from environment variables");
+async function connectDB(customUri) {
+  const mongoURI = customUri || process.env.MONGODB_URI || DEFAULT_MONGO_URI;
+
+  try {
+    await mongoose.connect(mongoURI, {
+      serverSelectionTimeoutMS: 5000,
+    });
+    console.log(`[MONGODB] Connected successfully to ${mongoURI}`);
+    return mongoose.connection;
+  } catch (err) {
+    console.error(`[MONGODB ERROR] Connection failed: ${err.message}`);
+    // Non-blocking fallback for offline/isolated environments
+    return null;
   }
-
-  await mongoose.connect(mongoURI);
-  console.log("MongoDB connected successfully");
 }
+
+async function disconnectDB() {
+  if (mongoose.connection.readyState !== 0) {
+    await mongoose.disconnect();
+    console.log("[MONGODB] Disconnected successfully");
+  }
+}
+
+connectDB.connectDB = connectDB;
+connectDB.disconnectDB = disconnectDB;
+connectDB.mongoose = mongoose;
 
 module.exports = connectDB;

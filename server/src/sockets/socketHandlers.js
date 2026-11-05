@@ -4,6 +4,19 @@
  * room join/leave logic, participant updates, duplicate event protection, and WebRTC signaling.
  */
 
+const mongoose = require("mongoose");
+let User = null;
+let World = null;
+let CommunicationSession = null;
+
+try {
+  User = require("../models/User");
+  World = require("../models/World");
+  CommunicationSession = require("../models/CommunicationSession");
+} catch (e) {
+  // Graceful fallback if models cannot be loaded
+}
+
 const {
   calculateDistance,
   calculateAudioVolume,
@@ -39,6 +52,19 @@ function registerCall(callerId, calleeId) {
   userCallMap.get(callerId).add(callId);
   userCallMap.get(calleeId).add(callId);
 
+  // Asynchronously record active CommunicationSession in MongoDB
+  if (CommunicationSession && mongoose.connection.readyState === 1) {
+    CommunicationSession.create({
+      participantIds: [callerId, calleeId],
+      status: "active",
+      startedAt: new Date(),
+    }).then((doc) => {
+      callRecord.dbSessionId = doc._id;
+    }).catch((err) => {
+      console.warn("[MONGODB SESSION CREATE WARNING]:", err.message);
+    });
+  }
+
   return callRecord;
 }
 
@@ -58,6 +84,14 @@ function endCallBetween(userA, userB) {
   for (const callId of callsToTerminate) {
     const call = activeAudioCalls.get(callId);
     if (call) {
+      if (CommunicationSession && mongoose.connection.readyState === 1 && call.dbSessionId) {
+        CommunicationSession.findByIdAndUpdate(call.dbSessionId, {
+          status: "ended",
+          endedAt: new Date(),
+        }).catch((err) => {
+          console.warn("[MONGODB SESSION END WARNING]:", err.message);
+        });
+      }
       userCallMap.get(call.callerId)?.delete(callId);
       userCallMap.get(call.calleeId)?.delete(callId);
       activeAudioCalls.delete(callId);
@@ -95,6 +129,14 @@ function cleanupUserCalls(socketId, io, reason = "peer_disconnected") {
   for (const callId of Array.from(callIds)) {
     const call = activeAudioCalls.get(callId);
     if (call) {
+      if (CommunicationSession && mongoose.connection.readyState === 1 && call.dbSessionId) {
+        CommunicationSession.findByIdAndUpdate(call.dbSessionId, {
+          status: "ended",
+          endedAt: new Date(),
+        }).catch((err) => {
+          console.warn("[MONGODB SESSION CLEANUP WARNING]:", err.message);
+        });
+      }
       const otherPeerId = call.callerId === socketId ? call.calleeId : call.callerId;
       userCallMap.get(otherPeerId)?.delete(callId);
       activeAudioCalls.delete(callId);
@@ -204,6 +246,28 @@ function createRoom({ roomId, name, description, maxParticipants, isPrivate = fa
   };
 
   rooms.set(sanitizedId, roomRecord);
+
+  // Synchronize with MongoDB World collection if database is connected
+  if (World && mongoose.connection.readyState === 1) {
+    World.findOneAndUpdate(
+      { name: sanitizedName },
+      {
+        $set: {
+          ownerId: creatorId,
+          layout: {
+            roomId: sanitizedId,
+            description: roomRecord.description,
+            maxParticipants: roomRecord.maxParticipants,
+            isPrivate: roomRecord.isPrivate,
+          },
+        },
+      },
+      { upsert: true, returnDocument: "after" }
+    ).catch((err) => {
+      console.warn(`[MONGODB WORLD UPSERT WARNING] ${sanitizedName}:`, err.message);
+    });
+  }
+
   return { success: true, room: roomRecord };
 }
 
@@ -387,6 +451,26 @@ function saveProfile(userId, data = {}) {
       u.availability = cleanStatus;
       users.set(sId, u);
     }
+  }
+
+  // Synchronize with MongoDB User collection if database is connected
+  if (User && mongoose.connection.readyState === 1) {
+    User.findOneAndUpdate(
+      { userId: cleanId },
+      {
+        $set: {
+          username: cleanUsername,
+          displayName: cleanUsername,
+          avatarColor: cleanColor,
+          color: cleanColor,
+          availability: cleanStatus,
+          status: cleanStatus,
+        },
+      },
+      { upsert: true, returnDocument: "after" }
+    ).catch((err) => {
+      console.warn(`[MONGODB USER UPSERT WARNING] ${cleanId}:`, err.message);
+    });
   }
 
   return { success: true, profile: updatedProfile };
@@ -1353,5 +1437,9 @@ module.exports = {
   saveRoomMessage,
   getRoomMessages,
   roomChatMessages,
+  // Database models
+  User,
+  World,
+  CommunicationSession,
 };
 

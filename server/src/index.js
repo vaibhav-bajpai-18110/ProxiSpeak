@@ -1,4 +1,4 @@
-﻿
+
 const express = require("express");
 const http = require("http");
 const path = require("path");
@@ -88,6 +88,7 @@ app.get("/api/status", (req, res) => {
     message: "ProxiSpeak server is operational",
     uptime: `${Math.floor(process.uptime())}s`,
     activeUsers: getUserCount(),
+    database: mongoose.connection.readyState === 1 ? "connected" : "disconnected",
     timestamp: new Date().toISOString(),
   });
 });
@@ -381,4 +382,3 @@ async function startServer() {
 }
 
 startServer();
-
