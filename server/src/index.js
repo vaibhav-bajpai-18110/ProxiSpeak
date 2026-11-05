@@ -1,4 +1,4 @@
-
+﻿
 const express = require("express");
 const http = require("http");
 const path = require("path");
@@ -264,6 +264,47 @@ app.get("/api/worlds", async (req, res) => {
       error: "Failed to retrieve worlds.",
     });
   }
+});
+
+// Test & Diagnostics endpoints for edge-case & resilience verification
+if (process.env.NODE_ENV !== "production") {
+  app.post("/api/test/database/disconnect", async (req, res) => {
+    try {
+      if (mongoose.connection.readyState !== 0) {
+        await mongoose.disconnect();
+      }
+      res.json({ status: "success", database: "disconnected" });
+    } catch (err) {
+      res.status(500).json({ status: "error", message: err.message });
+    }
+  });
+
+  app.post("/api/test/database/reconnect", async (req, res) => {
+    try {
+      if (mongoose.connection.readyState === 0) {
+        await connectDB();
+      }
+      res.json({
+        status: "success",
+        database: mongoose.connection.readyState === 1 ? "connected" : "disconnected",
+      });
+    } catch (err) {
+      res.status(500).json({ status: "error", message: err.message });
+    }
+  });
+}
+
+// 404 Handler for unknown routes
+app.use((req, res, next) => {
+  if (req.path.startsWith("/api/")) {
+    return res.status(404).json({
+      status: "error",
+      error: "Not Found",
+      message: `Cannot ${req.method} ${req.path}`,
+      path: req.path,
+    });
+  }
+  next();
 });
 
 // Get a world and its members

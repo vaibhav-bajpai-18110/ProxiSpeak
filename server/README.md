@@ -323,12 +323,12 @@ npm start
 ```
 Starts Express & Socket.IO server on `http://localhost:5000`.
 
-### Run Automated 27-Module Verification Suite
+### Run Automated 28-Module Verification Suite
 ```bash
 cd server
 npm test
 ```
-Executes all 27 automated integration tests:
+Executes all 28 automated integration tests:
 1. `GET /` (Root route)
 2. `GET /api/health` (Frontend health contract)
 3. `GET /api/status` (Active users and uptime)
@@ -356,6 +356,13 @@ Executes all 27 automated integration tests:
 25. **Room Chat Delivery & Same-Room WebRTC Signaling Relays (Socket.IO `chat:send`/`chat:message`, REST `GET /api/rooms/:roomId/messages`, `senderId` inclusion, same-room isolation enforcement)**
 26. **Socket.IO Reconnection Behaviour, Recovery & State Synchronization (Transport close drops, connection recovery via `connectionAck` with `auth.userId` profile restoration, post-reconnection roster & movement sync, room chat catch-up, and zombie socket prevention)**
 27. **Complete Full-Stack API Integration (Frontend core utilities $\longleftrightarrow$ Express REST endpoints $\longleftrightarrow$ MongoDB models $\longleftrightarrow$ Socket.IO multiplayer & WebRTC audio calling)**
+28. **Exhaustive Edge-Case Testing Battery (Task 19: Invalid inputs, down server ECONNREFUSED/timeout, MongoDB disconnection resilience & in-memory fallback, duplicate request idempotency, abrupt transport disconnects, mid-call audio teardown, and 10-socket churn burst)**
+
+### Run Standalone Edge-Case Verification Suite
+```bash
+cd server
+node test-edge-cases.js
+```
 
 ### Interactive Multi-Tab Visual & Audio Demo
 1. Start server: `npm start`
