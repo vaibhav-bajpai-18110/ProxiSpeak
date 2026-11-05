@@ -1,6 +1,7 @@
 const http = require("http");
 const { spawn } = require("child_process");
 const { io } = require("socket.io-client");
+const { runFullStackIntegrationTest } = require("./test-fullstack-integration");
 
 async function checkUrl(url, retries = 3) {
   for (let i = 0; i < retries; i++) {
@@ -2641,6 +2642,29 @@ async function runTest() {
       hasErrors = true;
     }
 
+    // 27. Full-Stack API Integration: Frontend <-> Backend <-> MongoDB <-> Socket.IO (Day 18)
+    await new Promise((r) => setTimeout(r, 400));
+    console.log("\n--- [27] Testing Complete Full-Stack Integration (Frontend, Backend, MongoDB, Socket.IO) ---");
+    const fullStackResult = await runFullStackIntegrationTest("http://localhost:5000");
+    if (
+      fullStackResult.success &&
+      fullStackResult.frontendVerified &&
+      fullStackResult.backendApiVerified &&
+      fullStackResult.databaseVerified &&
+      fullStackResult.socketRealtimeVerified &&
+      fullStackResult.webrtcSignalingVerified
+    ) {
+      console.log("--> PASS: Frontend client utilities, coordinate translation [0, 2000] -> [8, 88]%, and profile normalizers verified.");
+      console.log("--> PASS: Backend REST endpoints and frontend health/status contracts verified.");
+      console.log("--> PASS: MongoDB database persistence verified across User, World, WorldMember, and CommunicationSession models.");
+      console.log("--> PASS: Real-time Socket.IO multiplayer presence, avatar movement, and room chat delivery verified.");
+      console.log("--> PASS: WebRTC audio calling signaling relays and call state tracking in MongoDB verified.");
+      console.log("--> PASS: Full-stack four-tier pipeline operational with zero zombie socket leaks.");
+    } else {
+      console.error("--> FAIL: Full-stack integration test failed:", fullStackResult);
+      hasErrors = true;
+    }
+
   } catch (err) {
     console.error("\n[TEST RUNNER EXCEPTION]:", err.message || err);
     hasErrors = true;
@@ -2654,7 +2678,7 @@ async function runTest() {
       console.error("\n❌ VERIFICATION FAILED: One or more tests did not pass.\n");
       process.exit(1);
     } else {
-      console.log("\n✅ ALL TESTS PASSED: All 26 backend modules, reconnection recovery, room chat delivery, WebRTC relays, profile sync, and lifecycle verified.\n");
+      console.log("\n✅ ALL TESTS PASSED: All 27 full-stack modules, Frontend, Backend, MongoDB, Socket.IO, WebRTC relays, and lifecycle verified.\n");
       process.exit(0);
     }
   }

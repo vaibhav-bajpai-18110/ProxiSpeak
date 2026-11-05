@@ -33,9 +33,12 @@ server/
 ├── DAY14_TESTING_AND_BUG_REPORT.md # Day 14 comprehensive QA, multiplayer, reconnection & bug report
 ├── DAY15_ROOMS_AND_MULTIPLAYER_REPORT.md # Day 15 room creation, joining, leaving & multi-user report
 ├── DAY17_RECONNECTION_AND_SYNC_REPORT.md # Day 17 Socket.IO reconnection, temporary disconnects, recovery & sync report
+├── DAY18_FULL_STACK_INTEGRATION_REPORT.md # Day 18 Full-Stack Frontend <-> Backend <-> MongoDB <-> Socket.IO report
 ├── package.json              # Package manifest and scripts (start, test)
 ├── test-client.js            # Standalone Socket.IO test client
-├── verify.js                 # Automated 26-stage verification test runner
+├── test-fullstack-integration.js # Standalone 6-tier full-stack integration verification runner
+├── test-model-persistence.js # MongoDB model persistence verification script
+├── verify.js                 # Automated 27-stage verification test runner
 └── README.md                 # Complete backend documentation
 ```
 
@@ -303,12 +306,12 @@ npm start
 ```
 Starts Express & Socket.IO server on `http://localhost:5000`.
 
-### Run Automated 26-Module Verification Suite
+### Run Automated 27-Module Verification Suite
 ```bash
 cd server
 npm test
 ```
-Executes all 26 automated integration tests:
+Executes all 27 automated integration tests:
 1. `GET /` (Root route)
 2. `GET /api/health` (Frontend health contract)
 3. `GET /api/status` (Active users and uptime)
@@ -335,6 +338,7 @@ Executes all 26 automated integration tests:
 24. **Real-Time Participant Sync, Avatar Movement, User Joining & Leaving Lifecycle Across Multiple Clients (Multi-client roster sync, concurrent avatar moves, high-frequency bursts, live updates, and departure cleanup)**
 25. **Room Chat Delivery & Same-Room WebRTC Signaling Relays (Socket.IO `chat:send`/`chat:message`, REST `GET /api/rooms/:roomId/messages`, `senderId` inclusion, same-room isolation enforcement)**
 26. **Socket.IO Reconnection Behaviour, Recovery & State Synchronization (Transport close drops, connection recovery via `connectionAck` with `auth.userId` profile restoration, post-reconnection roster & movement sync, room chat catch-up, and zombie socket prevention)**
+27. **Complete Full-Stack API Integration (Frontend core utilities $\longleftrightarrow$ Express REST endpoints $\longleftrightarrow$ MongoDB models $\longleftrightarrow$ Socket.IO multiplayer & WebRTC audio calling)**
 
 ### Interactive Multi-Tab Visual & Audio Demo
 1. Start server: `npm start`

@@ -3,8 +3,10 @@ const http = require("http");
 const path = require("path");
 const cors = require("cors");
 const { Server } = require("socket.io");
+const mongoose = require("mongoose");
 require("dotenv").config();
 
+const connectDB = require("./config/db");
 const {
   registerSocketHandlers,
   getUserCount,
@@ -71,11 +73,13 @@ app.get("/api/health", (req, res) => {
 // Server Status Endpoint
 app.get("/api/status", (req, res) => {
   res.setHeader("Cache-Control", "no-cache");
+  const dbStatus = mongoose.connection.readyState === 1 ? "connected" : "disconnected";
   res.json({
     status: "active",
     message: "ProxiSpeak server is operational",
     uptime: `${Math.floor(process.uptime())}s`,
     activeUsers: getUserCount(),
+    database: dbStatus,
     timestamp: new Date().toISOString(),
   });
 });
@@ -220,6 +224,15 @@ io.on("connection", (socket) => {
 
 const PORT = process.env.PORT || 5000;
 
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+// Initialize Database connection and launch HTTP server
+(async function startServer() {
+  try {
+    await connectDB();
+  } catch (err) {
+    console.warn("[SERVER STARTUP] Proceeding with in-memory store (MongoDB offline):", err.message);
+  }
+
+  server.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+})();
