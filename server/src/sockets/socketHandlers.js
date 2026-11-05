@@ -314,7 +314,7 @@ function getProfile(userId) {
 
   // If user is currently in active socket sessions, synthesize from socket user
   for (const [sId, u] of users.entries()) {
-    if (sId === cleanId || u.id === cleanId) {
+    if (sId === cleanId || u.id === cleanId || u.userId === cleanId) {
       return {
         userId: cleanId,
         username: u.username,
@@ -377,7 +377,7 @@ function saveProfile(userId, data = {}) {
 
   // Synchronize with active socket user if connected
   for (const [sId, u] of users.entries()) {
-    if (sId === cleanId || u.id === cleanId) {
+    if (sId === cleanId || u.id === cleanId || u.userId === cleanId) {
       u.name = cleanUsername;
       u.username = cleanUsername;
       u.displayName = cleanUsername;
@@ -434,13 +434,24 @@ function getRoomParticipants(roomId) {
 /**
  * Internal logic for joining or switching rooms
  */
-function executeRoomJoin(socket, targetRoomId, newUsername, io) {
+function executeRoomJoin(socket, targetRoomId, newUsername, io, extraData = {}) {
   const user = users.get(socket.id);
   if (!user) return false;
 
   const targetRoom = sanitizeRoomId(targetRoomId || DEFAULT_ROOM);
   const oldRoom = user.roomId;
   const targetUsername = newUsername ? sanitizeUsername(newUsername, user.username) : user.username;
+
+  if (extraData && typeof extraData === "object" && extraData.userId) {
+    user.userId = extraData.userId;
+    const saved = getProfile(extraData.userId);
+    if (saved) {
+      user.color = saved.color || user.color;
+      user.avatarColor = saved.avatarColor || user.color;
+      user.status = saved.status || user.status;
+      user.availability = saved.availability || user.status;
+    }
+  }
 
   // Duplicate Join Guard: Idempotent if already in target room with identical username
   if (oldRoom === targetRoom && user.username === targetUsername) {
@@ -585,26 +596,48 @@ function registerSocketHandlers(io, socket) {
     console.error(`[SOCKET ERROR] Socket ${socket.id} error:`, err?.message || err);
   });
 
+  // Handshake recovery parameters for seamless reconnection
+  const auth = socket.handshake.auth || {};
+  const query = socket.handshake.query || {};
+  const initialUserId = auth.userId || query.userId || null;
+  const initialUsername = auth.username || query.username || null;
+  const initialRoomId = sanitizeRoomId(auth.roomId || query.roomId || DEFAULT_ROOM);
+
+  let assignedColor = getRandomColor();
+  let assignedStatus = "available";
+  let username = initialUsername ? sanitizeUsername(initialUsername) : `User-${socket.id.slice(0, 4)}`;
+
+  if (initialUserId) {
+    const saved = getProfile(initialUserId);
+    if (saved) {
+      assignedColor = saved.color || saved.avatarColor || assignedColor;
+      assignedStatus = saved.status || saved.availability || assignedStatus;
+      if (!initialUsername && saved.username) {
+        username = saved.username;
+      }
+    }
+  }
+
   // Default user record upon connection
-  const assignedColor = getRandomColor();
   const defaultUser = {
     id: socket.id,
-    name: `User-${socket.id.slice(0, 4)}`,
-    username: `User-${socket.id.slice(0, 4)}`,
-    displayName: `User-${socket.id.slice(0, 4)}`,
-    roomId: DEFAULT_ROOM,
+    userId: initialUserId || socket.id,
+    name: username,
+    username: username,
+    displayName: username,
+    roomId: initialRoomId,
     x: Math.floor(100 + Math.random() * 400),
     y: Math.floor(100 + Math.random() * 300),
     color: assignedColor,
     avatarColor: assignedColor,
-    status: "available",
-    availability: "available",
+    status: assignedStatus,
+    availability: assignedStatus,
   };
 
   users.set(socket.id, defaultUser);
 
-  // Automatically join default room
-  socket.join(DEFAULT_ROOM);
+  // Automatically join default room (or configured initialRoomId)
+  socket.join(initialRoomId);
 
   // 1. Connection Acknowledgment: Confirm connection to the client with session metadata
   socket.emit("connectionAck", {
@@ -616,14 +649,14 @@ function registerSocketHandlers(io, socket) {
 
   // 2. Initial sync: Send current room participants and all users to newly connected client
   socket.emit("roomParticipants", {
-    roomId: DEFAULT_ROOM,
-    participants: getRoomParticipants(DEFAULT_ROOM),
+    roomId: initialRoomId,
+    participants: getRoomParticipants(initialRoomId),
   });
   socket.emit("currentUsers", Array.from(users.values()));
   socket.emit("roomList", getRoomsList());
 
   // 3. Broadcast to peers that a participant/user joined
-  socket.to(DEFAULT_ROOM).emit("participantJoined", defaultUser);
+  socket.to(initialRoomId).emit("participantJoined", defaultUser);
   socket.broadcast.emit("userJoined", defaultUser);
 
   // 4. Room Creation Handler
@@ -682,7 +715,7 @@ function registerSocketHandlers(io, socket) {
         return;
       }
 
-      const success = executeRoomJoin(socket, targetRoomId, targetUsername, io);
+      const success = executeRoomJoin(socket, targetRoomId, targetUsername, io, data);
       if (typeof callback === "function") {
         if (success === false) {
           callback({ success: false, message: "Room join failed (full or invalid)", roomId: targetRoomId });
@@ -711,8 +744,19 @@ function registerSocketHandlers(io, socket) {
       const targetUsername = parsedData.username ? sanitizeUsername(parsedData.username, user.username) : user.username;
 
       if (parsedData.roomId) {
-        executeRoomJoin(socket, parsedData.roomId, targetUsername, io);
+        executeRoomJoin(socket, parsedData.roomId, targetUsername, io, parsedData);
         return;
+      }
+
+      if (parsedData.userId) {
+        user.userId = parsedData.userId;
+        const saved = getProfile(parsedData.userId);
+        if (saved) {
+          user.color = saved.color || user.color;
+          user.avatarColor = saved.avatarColor || user.color;
+          user.status = saved.status || user.status;
+          user.availability = saved.availability || user.status;
+        }
       }
 
       if (user.username === targetUsername && users.has(socket.id)) {
@@ -720,6 +764,8 @@ function registerSocketHandlers(io, socket) {
       }
 
       user.username = targetUsername;
+      user.name = targetUsername;
+      user.displayName = targetUsername;
       users.set(socket.id, user);
       socket.broadcast.emit("userJoined", user);
       socket.to(user.roomId).emit("participantJoined", user);
@@ -727,6 +773,46 @@ function registerSocketHandlers(io, socket) {
       console.error(`[JOIN ERROR] ${socket.id}:`, err.message);
       socket.emit("error:validation", { message: "Failed to process join" });
     }
+  });
+
+  // Reconnection state recovery & synchronization handler
+  socket.on("syncState", (data = {}, callback) => {
+    try {
+      const user = users.get(socket.id);
+      const targetRoom = sanitizeRoomId((data && data.roomId) || user?.roomId || DEFAULT_ROOM);
+      const syncPayload = {
+        status: "synced",
+        socketId: socket.id,
+        user: user || defaultUser,
+        roomId: targetRoom,
+        participants: getRoomParticipants(targetRoom),
+        messages: getRoomMessages(targetRoom),
+        rooms: getRoomsList(),
+        serverTime: new Date().toISOString(),
+      };
+      if (typeof callback === "function") {
+        callback(syncPayload);
+      } else {
+        socket.emit("syncStateResponse", syncPayload);
+      }
+    } catch (err) {
+      console.error(`[SYNC STATE ERROR] ${socket.id}:`, err.message);
+      if (typeof callback === "function") callback({ status: "error", message: err.message });
+      else socket.emit("error:validation", { message: "Failed to sync state" });
+    }
+  });
+
+  socket.on("sync", (data, callback) => {
+    const user = users.get(socket.id);
+    const targetRoom = sanitizeRoomId((data && data.roomId) || user?.roomId || DEFAULT_ROOM);
+    const payload = {
+      status: "synced",
+      socketId: socket.id,
+      participants: getRoomParticipants(targetRoom),
+      rooms: getRoomsList(),
+    };
+    if (typeof callback === "function") callback(payload);
+    else socket.emit("syncStateResponse", payload);
   });
 
   // 6. Leave Room Handler
@@ -805,18 +891,22 @@ function registerSocketHandlers(io, socket) {
   // Profile update event via Socket.IO
   socket.on("updateProfile", (data = {}, callback) => {
     try {
-      const result = saveProfile(socket.id, data);
+      const user = users.get(socket.id);
+      const targetUserId = (data && data.userId) || user?.userId || socket.id;
+      const result = saveProfile(targetUserId, data);
       if (!result.success) {
         const errPayload = { status: "error", message: result.message, code: result.code };
         if (typeof callback === "function") callback(errPayload);
         else socket.emit("error:validation", errPayload);
         return;
       }
+      if (targetUserId !== socket.id) {
+        profiles.set(socket.id, result.profile);
+      }
 
-      const user = users.get(socket.id);
       const broadcastPayload = {
         id: socket.id,
-        userId: socket.id,
+        userId: targetUserId,
         name: result.profile.username,
         username: result.profile.username,
         displayName: result.profile.displayName,
@@ -853,7 +943,8 @@ function registerSocketHandlers(io, socket) {
 
   // Query profile via Socket.IO
   socket.on("getProfile", (data = {}, callback) => {
-    const targetUserId = (typeof data === "string" ? data : data?.userId) || socket.id;
+    const user = users.get(socket.id);
+    const targetUserId = (typeof data === "string" ? data : data?.userId) || user?.userId || socket.id;
     const profile = getProfile(targetUserId);
     if (!profile) {
       const errPayload = { status: "error", message: `Profile not found for userId: ${targetUserId}` };

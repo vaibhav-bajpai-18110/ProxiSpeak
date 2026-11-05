@@ -36,6 +36,24 @@ server/
 Γö£ΓöÇΓöÇ test-client.js            # Standalone Socket.IO test client
 Γö£ΓöÇΓöÇ verify.js                 # Automated 22-stage verification test runner
 ΓööΓöÇΓöÇ README.md                 # Complete backend documentation
+
+├── public/
+│   └── index.html            # Interactive multi-tab 2D Canvas testing client with proximity indicators & room controls
+├── src/
+│   ├── index.js              # Express app, process safety nets, REST APIs, & HTTP server
+│   ├── sockets/
+│   │   └── socketHandlers.js # Socket.IO lifecycle, validation, room, proximity, & movement handlers
+│   └── services/
+│       └── proximityService.js # Spatial distance, audio volume attenuation & stereo pan calculations
+├── .env                      # Environment configurations (PORT=5000)
+├── .gitignore                # Git exclusion rules
+├── DAY14_TESTING_AND_BUG_REPORT.md # Day 14 comprehensive QA, multiplayer, reconnection & bug report
+├── DAY15_ROOMS_AND_MULTIPLAYER_REPORT.md # Day 15 room creation, joining, leaving & multi-user report
+├── DAY17_RECONNECTION_AND_SYNC_REPORT.md # Day 17 Socket.IO reconnection, temporary disconnects, recovery & sync report
+├── package.json              # Package manifest and scripts (start, test)
+├── test-client.js            # Standalone Socket.IO test client
+├── verify.js                 # Automated 26-stage verification test runner
+└── README.md                 # Complete backend documentation
 ```
 
 ---
@@ -302,12 +320,12 @@ npm start
 ```
 Starts Express & Socket.IO server on `http://localhost:5000`.
 
-### Run Automated 25-Module Verification Suite
+### Run Automated 26-Module Verification Suite
 ```bash
 cd server
 npm test
 ```
-Executes all 25 automated integration tests:
+Executes all 26 automated integration tests:
 1. `GET /` (Root route)
 2. `GET /api/health` (Frontend health contract)
 3. `GET /api/status` (Active users and uptime)
@@ -333,6 +351,7 @@ Executes all 25 automated integration tests:
 23. **Profile REST API, Validation Errors & Real-Time Sync (`GET /api/profile`, `PUT /api/profile`, `updateProfile` socket broadcast, hex color & availability validation)**
 24. **Real-Time Participant Sync, Avatar Movement, User Joining & Leaving Lifecycle Across Multiple Clients (Multi-client roster sync, concurrent avatar moves, high-frequency bursts, live updates, and departure cleanup)**
 25. **Room Chat Delivery & Same-Room WebRTC Signaling Relays (Socket.IO `chat:send`/`chat:message`, REST `GET /api/rooms/:roomId/messages`, `senderId` inclusion, same-room isolation enforcement)**
+26. **Socket.IO Reconnection Behaviour, Recovery & State Synchronization (Transport close drops, connection recovery via `connectionAck` with `auth.userId` profile restoration, post-reconnection roster & movement sync, room chat catch-up, and zombie socket prevention)**
 
 ### Interactive Multi-Tab Visual & Audio Demo
 1. Start server: `npm start`
