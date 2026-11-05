@@ -2,6 +2,7 @@ const http = require("http");
 const { spawn } = require("child_process");
 const { io } = require("socket.io-client");
 const { runFullStackIntegrationTest } = require("./test-fullstack-integration");
+const { runEdgeCaseTestSuite } = require("./test-edge-cases");
 
 async function checkUrl(url, retries = 3) {
   for (let i = 0; i < retries; i++) {
@@ -2665,6 +2666,28 @@ async function runTest() {
       hasErrors = true;
     }
 
+    // 28. Exhaustive Edge-Case Testing: Invalid Inputs, Down Server, DB Outage, Duplicates & Abrupt Disconnects (Task 19)
+    await new Promise((r) => setTimeout(r, 400));
+    console.log("\n--- [28] Testing Exhaustive Edge Cases (Task 19) ---");
+    const edgeCaseResult = await runEdgeCaseTestSuite("http://localhost:5000");
+    if (
+      edgeCaseResult.success &&
+      edgeCaseResult.results.category1_invalidInputs &&
+      edgeCaseResult.results.category2_unavailableServer &&
+      edgeCaseResult.results.category3_databaseFailures &&
+      edgeCaseResult.results.category4_duplicateRequests &&
+      edgeCaseResult.results.category5_unexpectedDisconnects
+    ) {
+      console.log("--> PASS: Invalid inputs (non-numeric, NaN, Infinity, extreme clamping, bad hex/status, empty/50KB chat, self-calls) safely rejected.");
+      console.log("--> PASS: Unavailable server handling (Socket.IO connect_error refusal, AbortController HTTP timeout) verified.");
+      console.log("--> PASS: Database outage resilience, GET /api/status reporting, in-memory operations fallback, and self-healing reconnection verified.");
+      console.log("--> PASS: Duplicate requests & idempotency (joinRoom flood prevention, duplicate createRoom rejection, compound unique index) verified.");
+      console.log("--> PASS: Unexpected user disconnections (abrupt transport severing, mid-call audio teardown, 10-client churn burst, zero zombie sockets) verified.");
+    } else {
+      console.error("--> FAIL: Edge case testing failed:", edgeCaseResult);
+      hasErrors = true;
+    }
+
   } catch (err) {
     console.error("\n[TEST RUNNER EXCEPTION]:", err.message || err);
     hasErrors = true;
@@ -2678,7 +2701,7 @@ async function runTest() {
       console.error("\n❌ VERIFICATION FAILED: One or more tests did not pass.\n");
       process.exit(1);
     } else {
-      console.log("\n✅ ALL TESTS PASSED: All 27 full-stack modules, Frontend, Backend, MongoDB, Socket.IO, WebRTC relays, and lifecycle verified.\n");
+      console.log("\n✅ ALL TESTS PASSED: All 28 full-stack modules, Frontend, Backend, MongoDB, Socket.IO, WebRTC relays, Edge Cases, and lifecycle verified.\n");
       process.exit(0);
     }
   }

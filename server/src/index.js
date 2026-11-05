@@ -191,6 +191,34 @@ app.put("/api/profile", handleProfileUpdate);
 app.put("/api/profile/:userId", handleProfileUpdate);
 app.post("/api/profile", handleProfileUpdate);
 
+// Test & Diagnostics endpoints for edge-case & resilience verification
+if (process.env.NODE_ENV !== "production") {
+  app.post("/api/test/database/disconnect", async (req, res) => {
+    try {
+      if (mongoose.connection.readyState !== 0) {
+        await mongoose.disconnect();
+      }
+      res.json({ status: "success", database: "disconnected" });
+    } catch (err) {
+      res.status(500).json({ status: "error", message: err.message });
+    }
+  });
+
+  app.post("/api/test/database/reconnect", async (req, res) => {
+    try {
+      if (mongoose.connection.readyState === 0) {
+        await connectDB();
+      }
+      res.json({
+        status: "success",
+        database: mongoose.connection.readyState === 1 ? "connected" : "disconnected",
+      });
+    } catch (err) {
+      res.status(500).json({ status: "error", message: err.message });
+    }
+  });
+}
+
 // 404 Handler for unknown routes
 app.use((req, res, next) => {
   if (req.path.startsWith("/api/")) {

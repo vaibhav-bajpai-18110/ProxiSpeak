@@ -2,6 +2,17 @@ const mongoose = require("mongoose");
 
 const DEFAULT_MONGO_URI = "mongodb://127.0.0.1:27017/proxispeak";
 
+// Mongoose connection state lifecycle monitoring
+mongoose.connection.on("disconnected", () => {
+  console.warn("[MONGODB EVENT] Database disconnected. Operating in in-memory fallback mode.");
+});
+mongoose.connection.on("error", (err) => {
+  console.error("[MONGODB EVENT ERROR]:", err.message);
+});
+mongoose.connection.on("reconnected", () => {
+  console.log("[MONGODB EVENT] Database reconnected successfully.");
+});
+
 async function connectDB(customUri) {
   const mongoURI = customUri || process.env.MONGODB_URI || DEFAULT_MONGO_URI;
 
