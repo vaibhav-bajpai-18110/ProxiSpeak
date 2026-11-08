@@ -1,4 +1,4 @@
-﻿
+
 const express = require("express");
 const http = require("http");
 const path = require("path");
@@ -34,7 +34,7 @@ const server = http.createServer(app);
 
 app.use(
   cors({
-    origin: "*",
+    origin: process.env.CLIENT_URL || "*",
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
   })
@@ -44,7 +44,7 @@ app.use(express.json());
 
 const io = require("socket.io")(server, {
   cors: {
-    origin: "*",
+    origin: process.env.CLIENT_URL || "*",
     methods: ["GET", "POST"],
   },
   pingTimeout: 10000,

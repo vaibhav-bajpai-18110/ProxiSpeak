@@ -20,7 +20,7 @@ async function connectDB(customUri) {
     await mongoose.connect(mongoURI, {
       serverSelectionTimeoutMS: 5000,
     });
-    console.log(`[MONGODB] Connected successfully to ${mongoURI}`);
+    console.log("[MONGODB] Connected successfully.");
     return mongoose.connection;
   } catch (err) {
     console.error(`[MONGODB ERROR] Connection failed: ${err.message}`);
