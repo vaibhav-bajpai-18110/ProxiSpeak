@@ -1,174 +1,202 @@
-# ProxiSpeak
+# ProxiSpeak – Geospatial Proximity Audio Ecosystem
 
-**Geospatial Proximity Audio Ecosystem**
+![Project](https://img.shields.io/badge/Project-ProxiSpeak-blue)
+![Status](https://img.shields.io/badge/Development-Completed-green)
+![Domain](https://img.shields.io/badge/Domain-Virtual%20Collaboration-purple)
 
-ProxiSpeak is a real-time virtual office platform where users can move their avatars around a shared virtual environment and communicate with other participants through proximity-based audio.
+## Overview
 
-The project aims to make remote collaboration more interactive by combining real-time participant presence, avatar movement, and voice communication.
+ProxiSpeak is a virtual office collaboration platform designed to make remote communication more natural and interactive.
 
-## Project Goals
+It provides a shared virtual workspace where users are represented by avatars and can interact with nearby participants through real-time communication.
 
-- Real-time avatar movement.
-- Shared virtual world for multiple participants.
-- Distance-based voice communication.
-- WebRTC-based audio communication.
-- Real-time participant synchronization.
-- User profile and availability management.
-- Interactive virtual office experience.
+The project explores proximity-based audio interaction using modern web technologies such as WebRTC, Socket.IO, React, Node.js, and MongoDB.
+
+## Problem Statement
+
+Traditional video conferencing applications mainly depend on fixed meeting rooms and scheduled communication.
+
+They do not fully recreate spontaneous conversations that naturally happen in physical offices.
+
+ProxiSpeak aims to address this limitation by introducing a virtual office where users can move around and interact with nearby participants.
 
 ## Key Features
 
-### 1. Real-Time Participant Presence
-Users can join the virtual office and view other connected participants. Participant information is synchronized through real-time communication.
+- Interactive virtual office environment.
+- Avatar-based participant representation.
+- Real-time participant movement.
+- Real-time communication using Socket.IO.
+- WebRTC-based peer-to-peer audio communication.
+- Proximity-oriented audio interaction.
+- User profile management.
+- Audio controls.
+- Workspace and room management.
+- Database-backed application information.
 
-### 2. Avatar Movement
-Participants can move their avatars around the shared virtual environment. Movement updates are synchronized with other connected users.
-
-### 3. Proximity-Based Audio
-The platform supports voice communication using audio-related web technologies. Its goal is to make communication dependent on participants' proximity within the virtual environment.
-
-### 4. User Profile Management
-Users can customize their display name and avatar color.
-
-### 5. Availability Status
-Users can select their availability status:
-- Available
-- Away
-- Busy
-- Do Not Disturb
-
-### 6. Backend Communication
-The backend provides APIs and real-time Socket.IO communication to support participant synchronization and application functionality.
+*Features should reflect the functionality available in the final submitted version.*
 
 ## Technology Stack
 
-### Frontend
-- React.js
-- Vite
-- JavaScript
-- HTML5
-- CSS3
+| Category | Technology |
+|---|---|
+| Frontend | React.js, JavaScript |
+| Styling | HTML5, CSS3 |
+| Backend | Node.js, Express.js |
+| Real-time Communication | Socket.IO |
+| Audio Communication | WebRTC |
+| Audio Processing | Web Audio API |
+| Database | MongoDB |
+| Version Control | Git and GitHub |
 
-### Backend
-- Node.js
-- Express.js
-- Socket.IO
+## System Architecture
 
-### Database
-- MongoDB
-- Mongoose
+The application follows a client-server architecture.
 
-### Real-Time Audio
-- WebRTC
-- Web Audio API
-
-### Development Tools
-- Visual Studio Code
-- Git
-- GitHub
-- npm
+1. The React frontend displays the virtual office.
+2. The backend handles requests and application logic.
+3. Socket.IO manages real-time signaling events.
+4. WebRTC supports peer-to-peer audio communication.
+5. MongoDB stores persistent application information.
 
 ## Project Structure
 
 ```text
 ProxiSpeak/
+│
 ├── client/
 │   ├── src/
 │   │   ├── App.jsx
 │   │   ├── App.css
-│   │   ├── audioUtils.js
-│   │   ├── presence.js
-│   │   ├── profileUtils.js
 │   │   └── useOfficeAudio.js
+│   ├── public/
 │   └── package.json
 │
 ├── server/
-│   ├── src/
+│   ├── models/
+│   ├── routes/
+│   ├── services/
 │   └── package.json
 │
-└── README.md
+├── README.md
+└── .gitignore
 ```
+
+*Update this tree according to the actual repository folders and files.*
 
 ## Installation and Setup
 
 ### Prerequisites
+
 - Node.js
 - npm
-- MongoDB database access
+- MongoDB connection
 - Git
+- VS Code
 
 ### Step 1: Clone the Repository
 
 ```bash
 git clone https://github.com/vaibhav-bajpai-18110/ProxiSpeak.git
+```
+
+### Step 2: Navigate to the Project
+
+```bash
 cd ProxiSpeak
 ```
 
-### Step 2: Install Backend Dependencies
-
-```bash
-cd server
-npm install
-```
-
-Configure the required MongoDB connection and environment variables according to the server configuration.
-
-### Step 3: Start Backend
-
-```bash
-npm start
-```
-
-### Step 4: Install Frontend Dependencies
-
-Open a separate terminal:
+### Step 3: Install Frontend Dependencies
 
 ```bash
 cd client
 npm install
 ```
 
-### Step 5: Start Frontend
+### Step 4: Configure Environment Variables
+
+Create the required `.env` file using the variable names expected by the application.
+
+Example:
+
+```env
+PORT=5000
+MONGODB_URI=your_mongodb_connection_string
+```
+
+Do not commit passwords, database credentials, or private API keys.
+
+### Step 5: Start the Frontend
 
 ```bash
 npm run dev
 ```
 
-Open the local development URL provided by Vite.
+### Step 6: Start the Backend
 
-## Testing and Validation
+Open another terminal and navigate to the server directory.
 
-The project has undergone the following development checks:
+```bash
+cd server
+npm install
+npm start
+```
 
-- Frontend production build completed successfully.
-- Automated test suite completed with 10 passing tests.
-- ESLint reported zero errors and two warnings.
-- Participant presence and movement manually tested.
-- Audio functionality manually tested.
-- Frontend and backend startup verified.
+Use the actual start scripts defined in the respective package.json files. If the backend uses a different development command, use that command instead.
 
-## Team Collaboration
+## Application Workflow
 
-ProxiSpeak is developed collaboratively using Git and GitHub.
+1. User opens the ProxiSpeak application.
+2. User accesses the virtual workspace.
+3. The application displays the available participants.
+4. Users interact with the virtual office through their avatars.
+5. Real-time events are exchanged through the server.
+6. WebRTC establishes audio connections where supported.
+7. Proximity-oriented logic manages the communication experience.
 
-The team follows a branch-based workflow to organize individual contributions, review changes, integrate features, and validate the application.
+## Team Members
 
-Changes are tracked through meaningful commits and pushed to the project repository.
+| Name | Responsibility |
+|---|---|
+| Vaibhav Bajpai | Team Leader and Integration |
+| Harshavardhan | Frontend Development |
+| Rakesh | Backend Development |
+| Manya | Database and Testing |
+
+## Testing
+
+Testing activities include:
+
+- Frontend interface testing.
+- Backend API testing.
+- Socket.IO communication testing.
+- Database connectivity and persistence testing.
+- WebRTC connection testing.
+- Audio functionality testing.
+- Integration testing.
 
 ## Future Improvements
 
-- Further optimization of proximity-based audio.
-- Improved user experience and interface.
-- Better connection and error handling.
-- Additional testing for multiple simultaneous participants.
-- Performance and reliability improvements.
+- Advanced 3D spatial audio.
+- Better support for concurrent participants.
+- More virtual office layouts.
+- Enhanced avatar customization.
+- Improved performance and scalability.
+- Mobile-friendly interface.
 
-## Project Repository
+## Project Information
 
-GitHub: https://github.com/vaibhav-bajpai-18110/ProxiSpeak
+**Project Name:** ProxiSpeak
+
+**Project Category:** Virtual Collaboration and Real-Time Communication
+
+**Organization:** Infotact Solutions
+
+**Project Leader:** Vaibhav Bajpai
+
+## Acknowledgement
+
+Developed as an internship project with the objective of exploring modern web development, real-time communication, and virtual collaboration technologies.
 
 ---
 
-**Project Name:** ProxiSpeak  
-**Category:** Real-Time Virtual Collaboration Platform  
-**Development Status:** Active Development
+**Made by Team ProxiSpeak**
